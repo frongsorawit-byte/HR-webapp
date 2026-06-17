@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HR Manager</title>
+
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // ── Coffee & Ochre · dark earth-tone palette ──
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Sarabun', 'sans-serif'] },
+                    colors: {
+                        espresso: '#1B1613', // พื้นหลังหลัก
+                        coffee:   '#2A211C', // การ์ด / nav / modal
+                        coffee2:  '#332821', // surface ยกระดับ / hover
+                        bean:     '#3A2F28', // เส้นขอบ
+                        cream:    '#EFE7DD', // ตัวอักษรหลัก
+                        latte:    '#A89684', // ตัวอักษรรอง
+                        ochre:    '#C9A24B', // accent หลัก (ปุ่ม/active)
+                        olive:    '#8A9A5B', // ยอดเงิน/บวก
+                        caramel:  '#D08C45', // วันลา/เตือน
+                        rust:     '#AE5547', // วิกฤต/เกิน
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- 2. Font ไทย -->
+    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;700&display=swap" rel="stylesheet">
+
+    <!-- 3. Chart.js (ก่อน Babel) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- 4. React + Babel -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        body { font-family: 'Sarabun', sans-serif; }
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-track { background: #1B1613; }
+        ::-webkit-scrollbar-thumb { background: #3A2F28; border-radius: 6px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4a3c33; }
+
+        /* ---- Print ---- */
+        @media print {
+            .no-print { display: none !important; }
+            nav { display: none !important; }
+            body { background: white !important; color: black !important; }
+            .bg-coffee, .bg-coffee2, .bg-espresso { background: white !important; }
+            .text-cream, .text-latte { color: black !important; }
+            .grid.lg\\:grid-cols-3 { display: block !important; }
+            .lg\\:col-span-2, .lg\\:col-span-1 { width: 100% !important; }
+            table { border-collapse: collapse !important; }
+            th, td { border: 1px solid #ccc !important; }
+        }
+    </style>
+</head>
+<body class="bg-espresso text-cream">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+        // --- 🟢 Apps Script Web app URL (override ได้ที่ ⚙️) ---
+        const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx5XSlaOs67UuBHNk4SlbVBBRnzrucCh4pnRkEubdizrJ6m8tDmHZfCDXQk_vTGG1ZE/exec";
+
+        // --- Mock Data (ใช้เฉพาะตอนยังไม่ตั้ง URL) ---
+        const MOCK_DATA = [
+            { id: 1, raw: "สาเบิก1000", name: "สา (ตัวอย่าง)", type: "เบิก", amount: 1000, leaveDate: "", transDate: "2025-10-28", durationType: "", deductHours: 0 },
+            { id: 2, raw: "สาหยุด28/10", name: "สา (ตัวอย่าง)", type: "หยุด", amount: 0, leaveDate: "28/10", transDate: "2025-10-29", durationType: "เต็มวัน", deductHours: 0 },
+            { id: 3, raw: "แตหยุดครึ่งวัน", name: "แต (ตัวอย่าง)", type: "หยุด", amount: 0, leaveDate: "2/11", transDate: "2025-11-01", durationType: "ครึ่งวัน", deductHours: 0 },
+            { id: 4, raw: "เอ็มหยุดเต็มวัน", name: "เอ็ม (ตัวอย่าง)", type: "หยุด", amount: 0, leaveDate: "2/11", transDate: "2025-11-01", durationType: "เต็มวัน", deductHours: 0 },
+            { id: 10, raw: "แอร์หัก4ชม", name: "แอร์ (ตัวอย่าง)", type: "หัก", amount: 0, leaveDate: "", transDate: "2025-11-09", durationType: "", deductHours: 4 },
+        ];
+
+        // --- POST helper ---
+        // หมายเหตุ: ไม่ตั้ง Content-Type: application/json เพื่อเลี่ยง CORS preflight (OPTIONS)
+        // ที่ Apps Script Web app ไม่รองรับ — body เป็น text/plain แต่ Apps Script อ่าน
+        // e.postData.contents แล้ว JSON.parse ได้ปกติ
+        async function postAction(scriptUrl, token, action, extra) {
+            const resp = await fetch(scriptUrl, {
+                method: 'POST',
+                body: JSON.stringify({ secret: token, action, ...(extra || {}) }),
+            });
+            const data = await resp.json();
+            if (!data.ok) throw new Error(data.error || 'error');
+            return data;
+        }
+
+        // --- Icons ---
+        const IconBase = ({ d, className }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>{d}</svg>
+        );
+        const CalendarIcon = (p) => <IconBase {...p} d={<><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></>} />;
+        const UsersIcon = (p) => <IconBase {...p} d={<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>} />;
+        const LayoutDashboardIcon = (p) => <IconBase {...p} d={<><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></>} />;
+        const ChevronLeftIcon = (p) => <IconBase {...p} d={<path d="m15 18-6-6 6-6"/>} />;
+        const ChevronRightIcon = (p) => <IconBase {...p} d={<path d="m9 18 6-6-6-6"/>} />;
+        const RefreshCwIcon = (p) => <IconBase {...p} d={<><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></>} />;
+        const XCircleIcon = (p) => <IconBase {...p} d={<><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></>} />;
+        const CheckCircleIcon = (p) => <IconBase {...p} d={<><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>} />;
+        const FileSpreadsheetIcon = (p) => <IconBase {...p} d={<><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><path d="M8 13h2"/><path d="M8 17h2"/><path d="M14 13h2"/><path d="M14 17h2"/></>} />;
+        const SettingsIcon = (p) => <IconBase {...p} d={<><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></>} />;
+        const BarChart2Icon = (p) => <IconBase {...p} d={<><line x1="18" x2="18" y1="20" y2="10"/><line x1="12" x2="12" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/></>} />;
+        const LogOutIcon = (p) => <IconBase {...p} d={<><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></>} />;
+        const LockIcon = (p) => <IconBase {...p} d={<><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></>} />;
+        const PlusIcon = (p) => <IconBase {...p} d={<><path d="M5 12h14"/><path d="M12 5v14"/></>} />;
+        const PencilIcon = (p) => <IconBase {...p} d={<><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></>} />;
+        const Trash2Icon = (p) => <IconBase {...p} d={<><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></>} />;
+        const WalletIcon = (p) => <IconBase {...p} d={<><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 1-1 1v-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></>} />;
+        const IdCardIcon = (p) => <IconBase {...p} d={<><rect width="18" height="14" x="3" y="5" rx="2"/><circle cx="9" cy="11" r="2"/><path d="M15 9h3"/><path d="M15 13h3"/><path d="M6.5 16a2.5 2.5 0 0 1 5 0"/></>} />;
+        const SearchIcon = (p) => <IconBase {...p} d={<><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></>} />;
+
+        // --- Date helpers ---
+        const parseLeaveDate = (dateStr, year) => {
+            if (!dateStr) return null;
+            const s = String(dateStr).trim();
+            if (!s) return null;
+            try {
+                if (s.includes('/')) {
+                    const parts = s.split('/');
+                    const day = parseInt(parts[0], 10);
+                    const month = parseInt(parts[1], 10);
+                    const yearVal = parts[2] ? parseInt(parts[2], 10) : year;
+                    if (!day || !month) return null;
+                    return new Date(yearVal, month - 1, day);
+                }
+                const d = new Date(s);
+                return isNaN(d.getTime()) ? null : d;
+            } catch { return null; }
+        };
+
+        const parseTransDate = (dateStr) => {
+            if (!dateStr) return null;
+            if (typeof dateStr === 'string' && dateStr.includes('/')) {
+                try {
+                    const parts = dateStr.split('/');
+                    if (parts.length === 3) {
+                        const day = parseInt(parts[0], 10);
+                        const month = parseInt(parts[1], 10);
+                        let year = parseInt(parts[2], 10);
+                        if (year > 2400) year -= 543;
+                        if (day > 0 && day <= 31 && month > 0 && month <= 12) return new Date(year, month - 1, day);
+                    }
+                } catch {}
+            }
+            const d = new Date(dateStr);
+            return isNaN(d.getTime()) ? null : d;
+        };
+
+        const getMonthData = (year, month) => {
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            const startDayOfWeek = new Date(year, month, 1).getDay();
+            return { daysInMonth, startDayOfWeek };
+        };
+
+        const monthNames = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+
+        const inputCls = "w-full px-3 py-2 text-sm border border-bean rounded-lg bg-coffee2 text-cream placeholder-latte/60 focus:outline-none focus:ring-2 focus:ring-ochre/60";
+
+        // --- Login Screen ---
+        const LoginScreen = ({ onLogin, error, busy }) => {
+            const [pass, setPass] = useState('');
+            const submit = (e) => { e.preventDefault(); if (pass.trim()) onLogin(pass.trim()); };
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4 bg-espresso">
+                    <form onSubmit={submit} className="w-full max-w-sm bg-coffee rounded-2xl shadow-2xl border border-bean overflow-hidden">
+                        <div className="px-6 py-6 text-center border-b border-bean">
+                            <div className="w-14 h-14 mx-auto rounded-2xl bg-ochre/15 flex items-center justify-center text-ochre mb-3">
+                                <LockIcon className="w-7 h-7" />
+                            </div>
+                            <h1 className="text-xl font-bold text-cream">HR Manager</h1>
+                            <p className="text-xs text-latte mt-1">ใส่รหัสผ่านเพื่อเข้าใช้งาน</p>
+                        </div>
+                        <div className="p-6 space-y-4">
+                            <input
+                                type="password" value={pass} onChange={e => setPass(e.target.value)} autoFocus
+                                className={inputCls} placeholder="รหัสผ่าน" />
+                            {error && <p className="text-xs text-rust">{error}</p>}
+                            <button type="submit" disabled={busy}
+                                className="w-full py-2.5 rounded-lg font-semibold bg-ochre text-espresso hover:brightness-110 transition disabled:opacity-60">
+                                {busy ? 'กำลังตรวจสอบ...' : 'เข้าสู่ระบบ'}
+                            </button>
+                            <p className="text-[11px] text-latte/70 text-center">รหัสเดียวกับ SECRET ที่ตั้งไว้ใน Apps Script</p>
+                        </div>
+                    </form>
+                </div>
+            );
+        };
+
+        // --- Settings Modal (URL only) ---
+        const SettingsModal = ({ isOpen, onClose, uiScriptUrl, setUiScriptUrl }) => {
+            const [localUrl, setLocalUrl] = useState(uiScriptUrl);
+            if (!isOpen) return null;
+            const save = () => { localStorage.setItem('hr_script_url', localUrl); setUiScriptUrl(localUrl); onClose(); };
+            return (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+                    <div className="bg-coffee rounded-2xl shadow-2xl w-full max-w-sm border border-bean overflow-hidden" onClick={e => e.stopPropagation()}>
+                        <div className="px-5 py-4 border-b border-bean flex justify-between items-center">
+                            <h3 className="text-lg font-bold text-cream flex items-center gap-2"><SettingsIcon className="w-5 h-5 text-ochre" /> ตั้งค่า</h3>
+                            <button onClick={onClose} className="p-1.5 rounded-full hover:bg-coffee2 text-latte"><XCircleIcon className="w-5 h-5"/></button>
+                        </div>
+                        <div className="p-5 space-y-4">
+                            <div>
+                                <label className="block text-sm font-medium text-cream mb-1">Apps Script URL</label>
+                                <input value={localUrl} onChange={e => setLocalUrl(e.target.value)} className={inputCls + " text-xs"} placeholder="https://script.google.com/macros/s/.../exec"/>
+                                <p className="text-[11px] text-latte/70 mt-1">เก็บใน localStorage ของเครื่องนี้</p>
+                            </div>
+                        </div>
+                        <div className="px-5 py-3 bg-coffee2/50 border-t border-bean flex justify-end gap-2">
+                            <button onClick={onClose} className="px-4 py-2 text-sm text-latte hover:text-cream">ยกเลิก</button>
+                            <button onClick={save} className="px-4 py-2 text-sm font-medium bg-ochre text-espresso rounded-lg hover:brightness-110">บันทึก</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Add Data Modal ---
+        const AddLeaveModal = ({ isOpen, onClose, initialDate, employeeNames, employees, sheetData, scriptUrl, token, onSuccess }) => {
+            const [selectedName, setSelectedName] = useState(employeeNames[0] || '');
+            const [type, setType] = useState('หยุด');
+            const [date, setDate] = useState(initialDate || '');
+            const [duration, setDuration] = useState('เต็มวัน');
+            const [amount, setAmount] = useState('');
+            const [hours, setHours] = useState('');
+            const [leaveTime, setLeaveTime] = useState('');
+            const [daysWorked, setDaysWorked] = useState('');
+            const [saving, setSaving] = useState(false);
+            const [saveError, setSaveError] = useState('');
+
+            useEffect(() => {
+                if (employeeNames.length > 0 && !employeeNames.includes(selectedName)) setSelectedName(employeeNames[0]);
+            }, [employeeNames]);
+
+            // ── คำนวณเพดานเบิก (earned-to-date) ──
+            const emp = useMemo(() => (employees || []).find(e => e.name === selectedName), [employees, selectedName]);
+            const salary = emp ? Number(emp.salary) || 0 : 0;
+            const workDays = emp ? Number(emp.workDays) || 0 : 0;
+            const overAdvance = emp ? !!emp.overAdvance : false;
+            const hasSalaryInfo = salary > 0 && workDays > 0;
+            const dailyRate = hasSalaryInfo ? salary / workDays : 0;
+            const earned = dailyRate * (parseFloat(daysWorked) || 0);
+            const outstanding = useMemo(() => {
+                if (!selectedName) return 0;
+                const now = new Date();
+                return (sheetData || [])
+                    .filter(d => d.name === selectedName && d.type && d.type.includes('เบิก'))
+                    .reduce((s, d) => {
+                        const dt = parseTransDate(d.transDate);
+                        return (dt && dt.getMonth() === now.getMonth() && dt.getFullYear() === now.getFullYear()) ? s + (parseFloat(d.amount) || 0) : s;
+                    }, 0);
+            }, [sheetData, selectedName]);
+            const available = earned - outstanding;
+            const reqAmount = parseFloat(amount) || 0;
+            const exceeds = hasSalaryInfo && daysWorked !== '' && reqAmount > available;
+            const blockSubmit = type === 'เบิก' && exceeds && !overAdvance;
+
+            if (!isOpen) return null;
+
+            const submit = async () => {
+                if (!selectedName) { setSaveError('กรุณาเลือกชื่อพนักงาน'); return; }
+                if (blockSubmit) { setSaveError('ยอดเบิกเกินเพดานสิทธิ์ — พนักงานคนนี้ไม่ได้ตั้งค่าให้เบิกเกิน'); return; }
+                setSaving(true); setSaveError('');
+                const today = new Date();
+                const todayStr = `${String(today.getDate()).padStart(2,'0')}/${String(today.getMonth()+1).padStart(2,'0')}/${today.getFullYear()}`;
+                const row = {
+                    'วันที่ดำเนินการ': todayStr,
+                    'ชื่อ': selectedName,
+                    'เบิกหรือหยุดหรือหัก': type,
+                    'จำนวนเงิน': type === 'เบิก' ? (parseFloat(amount) || '') : '',
+                    'วันที่หยุด': type === 'หยุด' ? date : '',
+                    'ครึ่งวันหรือเต็มวัน': type === 'หยุด' ? duration : '',
+                    'หักชั่วโมงทำงาน': (type === 'หัก' || type === 'เลิกงานไว') ? (parseFloat(hours) || '') : '',
+                    'input': `[UI] ${selectedName}${type} ${date || amount || hours || leaveTime}`,
+                };
+                try {
+                    await postAction(scriptUrl, token, 'append_hr', { row });
+                    onSuccess();
+                    onClose();
+                } catch (e) {
+                    setSaveError(`บันทึกไม่สำเร็จ: ${e.message}`);
+                } finally { setSaving(false); }
+            };
+
+            return (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+                    <div className="bg-coffee rounded-2xl shadow-2xl w-full max-w-sm border border-bean overflow-hidden" onClick={e => e.stopPropagation()}>
+                        <div className="px-5 py-4 border-b border-bean flex justify-between items-center">
+                            <h3 className="text-lg font-bold text-cream flex items-center gap-2"><PlusIcon className="w-5 h-5 text-ochre"/> เพิ่มข้อมูล</h3>
+                            <button onClick={onClose} className="p-1.5 rounded-full hover:bg-coffee2 text-latte"><XCircleIcon className="w-5 h-5"/></button>
+                        </div>
+                        <div className="p-5 space-y-3">
+                            <div>
+                                <label className="block text-xs font-medium text-latte mb-1">พนักงาน</label>
+                                <select value={selectedName} onChange={e => setSelectedName(e.target.value)} className={inputCls}>
+                                    {employeeNames.map(n => <option key={n} value={n}>{n}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-medium text-latte mb-1">ประเภท</label>
+                                <div className="grid grid-cols-4 gap-1">
+                                    {['เบิก','หยุด','เลิกงานไว','หัก'].map(t => (
+                                        <button key={t} onClick={() => setType(t)} className={`py-2 text-xs rounded-lg font-medium transition-colors ${type === t ? 'bg-ochre text-espresso' : 'bg-coffee2 text-latte hover:text-cream'}`}>{t}</button>
+                                    ))}
+                                </div>
+                            </div>
+                            {type === 'หยุด' && (
+                                <>
+                                    <div>
+                                        <label className="block text-xs font-medium text-latte mb-1">วันที่หยุด (D/M)</label>
+                                        <input value={date} onChange={e => setDate(e.target.value)} className={inputCls} placeholder="เช่น 15/5"/>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-latte mb-1">ระยะเวลา</label>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            {['เต็มวัน','ครึ่งวัน'].map(d => (
+                                                <button key={d} onClick={() => setDuration(d)} className={`py-2 text-sm rounded-lg font-medium transition-colors ${duration === d ? 'bg-ochre text-espresso' : 'bg-coffee2 text-latte'}`}>{d}</button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                            {type === 'เบิก' && (
+                                <>
+                                    <div>
+                                        <label className="block text-xs font-medium text-latte mb-1">จำนวนเงิน (บาท)</label>
+                                        <input type="number" value={amount} onChange={e => setAmount(e.target.value)} className={inputCls} placeholder="เช่น 2000"/>
+                                    </div>
+                                    {hasSalaryInfo ? (
+                                        <>
+                                            <div>
+                                                <label className="block text-xs font-medium text-latte mb-1">วันที่ทำงานไปแล้ว (เดือนนี้)</label>
+                                                <input type="number" value={daysWorked} onChange={e => setDaysWorked(e.target.value)} className={inputCls} placeholder={`0 - ${workDays}`}/>
+                                                <p className="text-[11px] text-latte/70 mt-1">สิทธิ์เบิก = (เงินเดือน ÷ {workDays}) × วันที่ทำงานไปแล้ว</p>
+                                            </div>
+                                            <div className="rounded-lg border border-bean bg-coffee2/40 p-3 text-xs space-y-1">
+                                                <div className="flex justify-between"><span className="text-latte">เงินเดือน</span><span className="text-cream font-mono">฿{salary.toLocaleString()}</span></div>
+                                                <div className="flex justify-between"><span className="text-latte">สิทธิ์เบิกถึงตอนนี้ (earned)</span><span className="text-cream font-mono">฿{Math.round(earned).toLocaleString()}</span></div>
+                                                <div className="flex justify-between"><span className="text-latte">เบิกไปแล้วเดือนนี้</span><span className="text-cream font-mono">฿{Math.round(outstanding).toLocaleString()}</span></div>
+                                                <div className="flex justify-between border-t border-bean pt-1 mt-1"><span className="text-latte font-semibold">เบิกได้อีก</span><span className={`font-mono font-bold ${available >= 0 ? 'text-olive' : 'text-rust'}`}>฿{Math.round(available).toLocaleString()}</span></div>
+                                            </div>
+                                            {exceeds && (
+                                                <p className={`text-xs ${overAdvance ? 'text-caramel' : 'text-rust'}`}>
+                                                    {overAdvance ? '⚠️ เกินเพดานสิทธิ์ แต่คนนี้ตั้งให้เบิกเกินได้' : '🚫 เกินเพดานสิทธิ์ — เบิกไม่ได้ (ตั้งให้เบิกเกินได้ที่หน้า "พนักงาน")'}
+                                                </p>
+                                            )}
+                                        </>
+                                    ) : (
+                                        selectedName && <p className="text-[11px] text-latte/70">ยังไม่ได้ตั้งเงินเดือน/วันทำงานของคนนี้ที่หน้า "พนักงาน" — เบิกได้ไม่จำกัด</p>
+                                    )}
+                                </>
+                            )}
+                            {type === 'หัก' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-latte mb-1">ชั่วโมงที่หัก</label>
+                                    <input type="number" step="0.5" value={hours} onChange={e => setHours(e.target.value)} className={inputCls} placeholder="เช่น 4"/>
+                                </div>
+                            )}
+                            {type === 'เลิกงานไว' && (
+                                <div>
+                                    <label className="block text-xs font-medium text-latte mb-1">ชั่วโมงที่หัก</label>
+                                    <input type="number" step="0.5" value={hours} onChange={e => setHours(e.target.value)} className={inputCls} placeholder="เช่น 2"/>
+                                    <p className="text-[11px] text-latte/70 mt-1">กรอกจำนวนชั่วโมงที่หักจากการเลิกงานก่อนเวลา</p>
+                                </div>
+                            )}
+                            {saveError && <p className="text-xs text-rust">{saveError}</p>}
+                        </div>
+                        <div className="px-5 py-3 bg-coffee2/50 border-t border-bean flex justify-end gap-2">
+                            <button onClick={onClose} className="px-4 py-2 text-sm text-latte hover:text-cream">ยกเลิก</button>
+                            <button onClick={submit} disabled={saving || blockSubmit} className="px-4 py-2 text-sm font-medium bg-ochre text-espresso rounded-lg hover:brightness-110 disabled:opacity-60">
+                                {saving ? 'กำลังบันทึก...' : 'บันทึก'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Day Detail Modal ---
+        const DayDetailModal = ({ isOpen, onClose, day, monthName, year, employees }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+                    <div className="bg-coffee rounded-2xl shadow-2xl w-full max-w-sm border border-bean overflow-hidden" onClick={e => e.stopPropagation()}>
+                        <div className="px-5 py-4 border-b border-bean flex justify-between items-center bg-coffee2/40">
+                            <h3 className="text-lg font-bold text-cream flex items-center gap-2"><CalendarIcon className="w-5 h-5 text-ochre" />{day} {monthName} {year}</h3>
+                            <button onClick={onClose} className="p-1.5 rounded-full hover:bg-coffee2 text-latte"><XCircleIcon className="w-6 h-6"/></button>
+                        </div>
+                        <div className="p-5 max-h-[60vh] overflow-y-auto">
+                            {employees.length === 0 ? (
+                                <div className="text-center py-6 text-latte">
+                                    <CheckCircleIcon className="w-12 h-12 mx-auto mb-3 opacity-20" />
+                                    <p className="font-medium">วันนี้ไม่มีพนักงานหยุด</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-4">
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-sm font-medium text-latte">รายการคนหยุด</span>
+                                        <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${employees.length >= 5 ? 'bg-rust/20 text-rust' : 'bg-coffee2 text-latte'}`}>
+                                            <UsersIcon className="w-3 h-3"/>{employees.length} คน
+                                        </div>
+                                    </div>
+                                    <ul className="space-y-2">
+                                        {employees.map((emp, idx) => (
+                                            <li key={idx} className="flex items-center gap-3 p-3 rounded-xl bg-coffee2/60 border border-bean">
+                                                <div className="w-9 h-9 shrink-0 rounded-full bg-ochre/15 flex items-center justify-center text-ochre font-bold text-sm">
+                                                    {emp.name.charAt(0)}
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="text-cream font-medium truncate">{emp.name}</div>
+                                                    <div className="text-xs text-latte">{emp.durationType || 'ไม่ระบุ'}</div>
+                                                </div>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
+                        </div>
+                        <div className="px-5 py-3 bg-coffee2/40 border-t border-bean text-right">
+                            <button onClick={onClose} className="text-sm font-medium text-latte hover:text-cream">ปิดหน้าต่าง</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Calendar View ---
+        const CalendarView = ({ leaveData, currentMonth, currentYear, onChangeMonth, onAddLeave }) => {
+            const { daysInMonth, startDayOfWeek } = getMonthData(currentYear, currentMonth);
+            const [selectedDay, setSelectedDay] = useState(null);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+
+            const leavesByDate = useMemo(() => {
+                const map = {};
+                leaveData.forEach(item => {
+                    const dateObj = parseLeaveDate(item.leaveDate, currentYear);
+                    if (dateObj && dateObj.getMonth() === currentMonth) {
+                        const day = dateObj.getDate();
+                        if (!map[day]) map[day] = [];
+                        map[day].push({ name: item.name, durationType: item.durationType });
+                    }
+                });
+                return map;
+            }, [leaveData, currentMonth, currentYear]);
+
+            const totalAbsences = useMemo(() => Object.values(leavesByDate).reduce((s, a) => s + a.length, 0), [leavesByDate]);
+            const maxDay = useMemo(() => {
+                let max = 0, maxD = null;
+                Object.entries(leavesByDate).forEach(([d, arr]) => { if (arr.length > max) { max = arr.length; maxD = d; } });
+                return maxD ? `${maxD} ${monthNames[currentMonth]} (${max} คน)` : '-';
+            }, [leavesByDate, currentMonth]);
+
+            const getIntensityColor = (count) => {
+                if (count === 0) return "";
+                if (count === 1) return "bg-caramel/10 border-caramel/30 text-caramel";
+                if (count === 2) return "bg-caramel/20 border-caramel/40 text-caramel";
+                if (count <= 4) return "bg-caramel/70 border-caramel text-espresso";
+                if (count <= 6) return "bg-rust/80 border-rust text-cream";
+                return "bg-rust border-rust text-cream animate-pulse";
+            };
+
+            const handleDayClick = (day, employees) => {
+                setSelectedDay({ day, monthName: monthNames[currentMonth], year: currentYear, employees });
+                setIsModalOpen(true);
+            };
+
+            const days = [];
+            for (let i = 0; i < startDayOfWeek; i++) {
+                days.push(<div key={`empty-${i}`} className="h-24 md:h-32 bg-coffee/40 border border-bean/40"></div>);
+            }
+            for (let day = 1; day <= daysInMonth; day++) {
+                const employeesOnLeave = leavesByDate[day] || [];
+                const count = employeesOnLeave.length;
+                const colorClass = getIntensityColor(count);
+                const isCrisis = count >= 5;
+                const dateStr = `${day}/${currentMonth + 1}`;
+                days.push(
+                    <div key={`day-${day}`} onClick={() => handleDayClick(day, employeesOnLeave)}
+                        className="h-24 md:h-32 border border-bean p-1 md:p-2 relative group hover:bg-coffee2/50 transition-colors bg-coffee overflow-hidden cursor-pointer active:scale-[0.98]">
+                        <div className="flex justify-between items-start">
+                            <span className={`text-sm font-medium ${count > 0 ? 'text-cream' : 'text-latte/60'}`}>{day}</span>
+                            {count > 0 && (
+                                <span className={`inline-flex text-[10px] px-1.5 py-0.5 rounded-full font-bold ${isCrisis ? 'bg-rust/20 text-rust' : 'bg-coffee2 text-latte'}`}>
+                                    {count}
+                                </span>
+                            )}
+                        </div>
+                        <div className="mt-1 space-y-0.5">
+                            {employeesOnLeave.slice(0, 3).map((emp, idx) => (
+                                <div key={idx} className={`text-[10px] md:text-xs px-1 md:px-2 py-0.5 rounded truncate border-l-2 md:border-l-4 ${colorClass}`}>
+                                    {emp.name}
+                                </div>
+                            ))}
+                            {count > 3 && <div className="text-[10px] text-latte pl-1">+{count - 3}</div>}
+                        </div>
+                        <button
+                            onClick={e => { e.stopPropagation(); onAddLeave(dateStr); }}
+                            className="absolute bottom-1 right-1 w-5 h-5 bg-ochre text-espresso rounded-full text-xs flex items-center justify-center hover:brightness-110 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="เพิ่มข้อมูลวันนี้"
+                        >+</button>
+                    </div>
+                );
+            }
+
+            return (
+                <React.Fragment>
+                    <div className="bg-coffee rounded-xl shadow-sm border border-bean overflow-hidden">
+                        <div className="flex items-center justify-between p-4 border-b border-bean">
+                            <h2 className="text-lg font-bold text-cream flex items-center gap-2">
+                                <CalendarIcon className="w-5 h-5 text-ochre"/>
+                                <span className="hidden md:inline">ตารางวันหยุด (Manpower)</span>
+                                <span className="md:hidden">วันหยุด</span>
+                            </h2>
+                            <div className="flex items-center space-x-2">
+                                <button onClick={() => onChangeMonth(-1)} className="p-1 hover:bg-coffee2 rounded text-latte"><ChevronLeftIcon className="w-5 h-5"/></button>
+                                <span className="text-cream font-medium min-w-[100px] text-center">{monthNames[currentMonth]} {currentYear}</span>
+                                <button onClick={() => onChangeMonth(1)} className="p-1 hover:bg-coffee2 rounded text-latte"><ChevronRightIcon className="w-5 h-5"/></button>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-7 bg-coffee2/50 border-b border-bean text-center py-2">
+                            {['อา','จ','อ','พ','พฤ','ศ','ส'].map(d => <div key={d} className="text-xs md:text-sm font-semibold text-latte">{d}</div>)}
+                        </div>
+                        <div className="grid grid-cols-7 bg-bean gap-px border-b border-bean">
+                            {days}
+                        </div>
+                        <div className="px-4 py-2 border-t border-bean bg-coffee2/40 text-xs text-latte flex justify-between">
+                            <span>รวมหยุดในเดือนนี้: <strong className="text-cream">{totalAbsences} ครั้ง</strong></span>
+                            <span className="hidden md:inline">หยุดมากสุด: <strong className="text-cream">{maxDay}</strong></span>
+                        </div>
+                    </div>
+                    {selectedDay && <DayDetailModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} day={selectedDay.day} monthName={selectedDay.monthName} year={selectedDay.year} employees={selectedDay.employees} />}
+                </React.Fragment>
+            );
+        };
+
+        // --- Monthly Summary Table ---
+        const MonthlySummaryTable = ({ allData, currentMonth, currentYear }) => {
+            const [searchQuery, setSearchQuery] = useState('');
+
+            const summary = useMemo(() => {
+                const map = {};
+                allData.forEach(item => {
+                    let checkDate = null;
+                    if (item.type && item.type.includes('หยุด')) checkDate = parseLeaveDate(item.leaveDate, currentYear);
+                    else checkDate = parseTransDate(item.transDate);
+                    if (!checkDate || checkDate.getMonth() !== currentMonth || checkDate.getFullYear() !== currentYear) return;
+                    if (!map[item.name]) map[item.name] = { leaveDays: 0, advance: 0, deductHours: 0 };
+                    if (item.type && item.type.includes('หยุด')) map[item.name].leaveDays += item.durationType === 'ครึ่งวัน' ? 0.5 : 1;
+                    if (item.type && item.type.includes('เบิก')) map[item.name].advance += parseFloat(item.amount) || 0;
+                    const hours = parseFloat(item.deductHours) || 0;
+                    if (hours > 0) map[item.name].deductHours += hours;
+                });
+                return Object.entries(map).sort((a, b) => b[1].advance - a[1].advance);
+            }, [allData, currentMonth, currentYear]);
+
+            const filtered = useMemo(() => {
+                if (!searchQuery) return summary;
+                return summary.filter(([name]) => name.includes(searchQuery));
+            }, [summary, searchQuery]);
+
+            const totalAdvance = summary.reduce((acc, curr) => acc + curr[1].advance, 0);
+
+            return (
+                <div className="bg-coffee rounded-xl shadow-sm border border-bean overflow-hidden flex flex-col h-full">
+                    <div className="p-4 border-b border-bean space-y-3">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-lg font-bold text-cream flex items-center gap-2"><FileSpreadsheetIcon className="w-5 h-5 text-olive"/>สรุปประจำเดือน</h2>
+                            <span className="text-xs font-bold text-olive bg-olive/10 px-2 py-1 rounded-full border border-olive/30">รวมเบิก ฿{totalAdvance.toLocaleString()}</span>
+                        </div>
+                        <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="ค้นหาชื่อพนักงาน..." className={inputCls}/>
+                    </div>
+                    <div className="overflow-x-auto overflow-y-auto flex-1 max-h-[400px] lg:max-h-none">
+                        {filtered.length === 0 ? (
+                            <div className="p-8 text-center text-latte text-sm">{searchQuery ? 'ไม่พบพนักงานที่ค้นหา' : 'ไม่มีข้อมูลในเดือนนี้'}</div>
+                        ) : (
+                            <table className="w-full text-left border-collapse">
+                                <thead className="bg-coffee2/50 sticky top-0 z-10">
+                                    <tr>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase">ชื่อ</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase text-center">ลา</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase text-right">เบิก (บ.)</th>
+                                        <th className="p-3 text-xs font-semibold text-rust uppercase text-right">หัก (ชม.)</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-bean">
+                                    {filtered.map(([name, data], idx) => (
+                                        <tr key={name} className="hover:bg-coffee2/40 transition-colors">
+                                            <td className="p-3 text-sm text-cream font-medium">
+                                                <div className="flex items-center gap-2"><span className="text-latte text-xs w-4">{idx+1}.</span>{name}</div>
+                                            </td>
+                                            <td className="p-3 text-sm text-center">
+                                                {data.leaveDays > 0 ? <span className="bg-caramel/15 text-caramel px-2 py-0.5 rounded text-xs font-bold">{data.leaveDays}</span> : <span className="text-latte/50">-</span>}
+                                            </td>
+                                            <td className="p-3 text-sm text-cream text-right font-mono">{data.advance > 0 ? data.advance.toLocaleString() : <span className="text-latte/50">-</span>}</td>
+                                            <td className="p-3 text-sm text-rust text-right font-mono font-bold">{data.deductHours > 0 ? data.deductHours : <span className="text-latte/50">-</span>}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Trend Charts ---
+        const TrendCharts = ({ allData }) => {
+            const [activeChart, setActiveChart] = useState('advance');
+            const advanceRef = useRef(null);
+            const leaveRef = useRef(null);
+
+            const { labels, employeeList, advanceByMonth, leaveByMonth } = useMemo(() => {
+                const now = new Date();
+                const months = [];
+                for (let i = 2; i >= 0; i--) {
+                    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+                    months.push({ label: `${monthNames[d.getMonth()].slice(0,3)} ${d.getFullYear()}`, month: d.getMonth(), year: d.getFullYear() });
+                }
+                const empSet = new Set(allData.map(d => d.name).filter(Boolean));
+                const empList = [...empSet].slice(0, 8);
+                const advMap = {}, leaveMap = {};
+                empList.forEach(name => { advMap[name] = [0,0,0]; leaveMap[name] = [0,0,0]; });
+                allData.forEach(item => {
+                    if (!empList.includes(item.name)) return;
+                    months.forEach((m, idx) => {
+                        const isMatch = (dateObj) => dateObj && dateObj.getMonth() === m.month && dateObj.getFullYear() === m.year;
+                        if (item.type && item.type.includes('เบิก')) { const d = parseTransDate(item.transDate); if (isMatch(d)) advMap[item.name][idx] += parseFloat(item.amount) || 0; }
+                        if (item.type && item.type.includes('หยุด')) { const d = parseLeaveDate(item.leaveDate, m.year); if (isMatch(d)) leaveMap[item.name][idx] += item.durationType === 'ครึ่งวัน' ? 0.5 : 1; }
+                    });
+                });
+                return { labels: months.map(m => m.label), employeeList: empList, advanceByMonth: advMap, leaveByMonth: leaveMap };
+            }, [allData]);
+
+            const COLORS = ['#C9A24B','#8A9A5B','#D08C45','#AE5547','#B98A4E','#7E9266','#CBB26B','#A89684'];
+            const gridColor = 'rgba(239,231,221,0.08)';
+            const tickColor = '#A89684';
+
+            const buildChart = (canvas, type, data, yLabel) => {
+                const existing = Chart.getChart(canvas);
+                if (existing) existing.destroy();
+                new Chart(canvas, {
+                    type,
+                    data: {
+                        labels,
+                        datasets: employeeList.map((name, i) => ({
+                            label: name, data: data[name] || [0,0,0],
+                            borderColor: COLORS[i % COLORS.length],
+                            backgroundColor: COLORS[i % COLORS.length] + (type === 'bar' ? 'aa' : '22'),
+                            borderWidth: 2, tension: 0.3, fill: type === 'line', pointRadius: 4,
+                        })),
+                    },
+                    options: {
+                        responsive: true,
+                        plugins: { legend: { position: 'bottom', labels: { color: tickColor, boxWidth: 12, font: { family: 'Sarabun', size: 11 } } } },
+                        scales: {
+                            x: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                            y: { ticks: { color: tickColor }, grid: { color: gridColor }, title: { display: true, text: yLabel, color: tickColor } },
+                        },
+                    },
+                });
+            };
+
+            useEffect(() => { if (advanceRef.current) buildChart(advanceRef.current, 'line', advanceByMonth, 'บาท'); }, [advanceByMonth]);
+            useEffect(() => { if (leaveRef.current) buildChart(leaveRef.current, 'bar', leaveByMonth, 'วัน'); }, [leaveByMonth]);
+
+            const btnCls = (active) => `px-4 py-2 text-sm font-medium rounded-lg transition-colors ${active ? 'bg-ochre text-espresso' : 'bg-coffee2 text-latte hover:text-cream'}`;
+
+            return (
+                <div className="no-print bg-coffee rounded-xl shadow-sm border border-bean p-4">
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-lg font-bold text-cream flex items-center gap-2"><BarChart2Icon className="w-5 h-5 text-ochre"/> Trend (3 เดือนล่าสุด)</h2>
+                        <div className="flex gap-2">
+                            <button onClick={() => setActiveChart('advance')} className={btnCls(activeChart === 'advance')}>เบิกรายเดือน</button>
+                            <button onClick={() => setActiveChart('leave')} className={btnCls(activeChart === 'leave')}>วันลา</button>
+                        </div>
+                    </div>
+                    <div style={{position:'relative', minHeight:'250px'}}>
+                        <canvas ref={advanceRef} style={{display: activeChart === 'advance' ? 'block' : 'none'}}/>
+                        <canvas ref={leaveRef} style={{display: activeChart === 'leave' ? 'block' : 'none'}}/>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Employee Modal (เพิ่ม/แก้พนักงาน) ---
+        const EmployeeModal = ({ isOpen, onClose, scriptUrl, token, editing, onSuccess }) => {
+            const blank = { name:'', nickname:'', position:'', phone:'', startDate:'', salary:'', workDays:'30', overAdvance:false, lineUserId:'', status:'active' };
+            const [emp, setEmp] = useState(blank);
+            const [saving, setSaving] = useState(false);
+            const [err, setErr] = useState('');
+
+            useEffect(() => {
+                if (editing) setEmp({ ...blank, ...editing, salary: editing.salary || '', workDays: editing.workDays || '30', overAdvance: !!editing.overAdvance });
+                else setEmp(blank);
+                setErr('');
+            }, [editing, isOpen]);
+
+            if (!isOpen) return null;
+            const set = (k, v) => setEmp(p => ({ ...p, [k]: v }));
+
+            const submit = async () => {
+                if (!String(emp.name).trim()) { setErr('กรุณากรอกชื่อ'); return; }
+                setSaving(true); setErr('');
+                const payload = {
+                    name: String(emp.name).trim(), nickname: emp.nickname, position: emp.position,
+                    phone: emp.phone, startDate: emp.startDate, status: emp.status || 'active',
+                    salary: emp.salary === '' ? '' : parseFloat(emp.salary) || 0,
+                    workDays: emp.workDays === '' ? '' : parseFloat(emp.workDays) || 0,
+                    overAdvance: !!emp.overAdvance, lineUserId: emp.lineUserId,
+                };
+                try {
+                    if (editing) await postAction(scriptUrl, token, 'update_employee', { original: editing.name, emp: payload });
+                    else await postAction(scriptUrl, token, 'add_employee', { emp: payload });
+                    onSuccess(); onClose();
+                } catch (e) { setErr(`บันทึกไม่สำเร็จ: ${e.message}`); }
+                finally { setSaving(false); }
+            };
+
+            const field = (label, k, type='text', placeholder='') => (
+                <div>
+                    <label className="block text-xs font-medium text-latte mb-1">{label}</label>
+                    <input type={type} value={emp[k]} onChange={e => set(k, e.target.value)} className={inputCls} placeholder={placeholder}/>
+                </div>
+            );
+
+            return (
+                <div className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={onClose}>
+                    <div className="bg-coffee rounded-2xl shadow-2xl w-full max-w-md border border-bean overflow-hidden max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="px-5 py-4 border-b border-bean flex justify-between items-center">
+                            <h3 className="text-lg font-bold text-cream flex items-center gap-2"><IdCardIcon className="w-5 h-5 text-ochre"/> {editing ? 'แก้ไขพนักงาน' : 'เพิ่มพนักงาน'}</h3>
+                            <button onClick={onClose} className="p-1.5 rounded-full hover:bg-coffee2 text-latte"><XCircleIcon className="w-5 h-5"/></button>
+                        </div>
+                        <div className="p-5 space-y-3 overflow-y-auto">
+                            <div className="grid grid-cols-2 gap-3">
+                                {field('ชื่อ *', 'name', 'text', 'ชื่อจริง/ชื่อที่ใช้ในระบบ')}
+                                {field('ชื่อเล่น / ชื่อในแชท', 'nickname')}
+                                {field('ตำแหน่ง', 'position')}
+                                {field('เบอร์โทร', 'phone', 'tel')}
+                                {field('วันเริ่มงาน', 'startDate', 'date')}
+                                {field('เงินเดือน (บาท)', 'salary', 'number', 'เช่น 12000')}
+                                {field('วันทำงาน/เดือน', 'workDays', 'number', '30')}
+                                {field('LINE user ID', 'lineUserId', 'text', 'เผื่ออนาคต')}
+                            </div>
+                            <label className="flex items-center gap-2 pt-1 cursor-pointer">
+                                <input type="checkbox" checked={emp.overAdvance} onChange={e => set('overAdvance', e.target.checked)} className="w-4 h-4 accent-ochre"/>
+                                <span className="text-sm text-cream">อนุญาตให้เบิกเกินเพดาน (คนพิเศษ)</span>
+                            </label>
+                            {err && <p className="text-xs text-rust">{err}</p>}
+                        </div>
+                        <div className="px-5 py-3 bg-coffee2/50 border-t border-bean flex justify-end gap-2">
+                            <button onClick={onClose} className="px-4 py-2 text-sm text-latte hover:text-cream">ยกเลิก</button>
+                            <button onClick={submit} disabled={saving} className="px-4 py-2 text-sm font-medium bg-ochre text-espresso rounded-lg hover:brightness-110 disabled:opacity-60">{saving ? 'กำลังบันทึก...' : 'บันทึก'}</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- Directory View (รายชื่อพนักงาน) ---
+        const DirectoryView = ({ employees, loading, onAdd, onEdit, onDelete }) => {
+            const [q, setQ] = useState('');
+            const filtered = useMemo(() => {
+                if (!q) return employees;
+                return employees.filter(e => (e.name + ' ' + (e.nickname||'') + ' ' + (e.position||'')).includes(q));
+            }, [employees, q]);
+
+            return (
+                <div className="bg-coffee rounded-xl shadow-sm border border-bean overflow-hidden">
+                    <div className="p-4 border-b border-bean flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <h2 className="text-lg font-bold text-cream flex items-center gap-2">
+                            <UsersIcon className="w-5 h-5 text-ochre"/> พนักงาน
+                            <span className="text-xs font-medium text-latte bg-coffee2 px-2 py-0.5 rounded-full">{employees.length} คน</span>
+                        </h2>
+                        <div className="flex items-center gap-2">
+                            <div className="relative">
+                                <SearchIcon className="w-4 h-4 text-latte absolute left-2.5 top-1/2 -translate-y-1/2"/>
+                                <input value={q} onChange={e => setQ(e.target.value)} placeholder="ค้นหา..." className={inputCls + " pl-8 w-40"}/>
+                            </div>
+                            <button onClick={onAdd} className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-ochre text-espresso text-sm font-semibold hover:brightness-110 whitespace-nowrap"><PlusIcon className="w-4 h-4"/> เพิ่ม</button>
+                        </div>
+                    </div>
+                    <div className="overflow-x-auto">
+                        {loading ? (
+                            <div className="p-8 text-center text-latte text-sm">กำลังโหลด...</div>
+                        ) : filtered.length === 0 ? (
+                            <div className="p-8 text-center text-latte text-sm">{q ? 'ไม่พบพนักงาน' : 'ยังไม่มีพนักงาน — กด "เพิ่ม"'}</div>
+                        ) : (
+                            <table className="w-full text-left border-collapse min-w-[640px]">
+                                <thead className="bg-coffee2/50">
+                                    <tr>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase">ชื่อ</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase">ตำแหน่ง</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase">เบอร์</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase text-right">เงินเดือน</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase text-center">เบิกเกิน</th>
+                                        <th className="p-3 text-xs font-semibold text-latte uppercase text-right">จัดการ</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-bean">
+                                    {filtered.map((e) => (
+                                        <tr key={e.name} className="hover:bg-coffee2/40 transition-colors">
+                                            <td className="p-3 text-sm text-cream font-medium">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="w-8 h-8 shrink-0 rounded-full bg-ochre/15 flex items-center justify-center text-ochre font-bold text-xs">{e.name.charAt(0)}</div>
+                                                    <div>
+                                                        <div>{e.name}</div>
+                                                        {e.nickname && <div className="text-[11px] text-latte">{e.nickname}</div>}
+                                                    </div>
+                                                </div>
+                                            </td>
+                                            <td className="p-3 text-sm text-latte">{e.position || '-'}</td>
+                                            <td className="p-3 text-sm text-latte font-mono">{e.phone || '-'}</td>
+                                            <td className="p-3 text-sm text-cream text-right font-mono">{e.salary > 0 ? Number(e.salary).toLocaleString() : '-'}</td>
+                                            <td className="p-3 text-center">{e.overAdvance ? <span className="text-[11px] bg-caramel/15 text-caramel px-2 py-0.5 rounded-full font-bold">ได้</span> : <span className="text-latte/40 text-xs">-</span>}</td>
+                                            <td className="p-3 text-right whitespace-nowrap">
+                                                <button onClick={() => onEdit(e)} className="p-1.5 rounded-lg text-latte hover:text-ochre hover:bg-coffee2" title="แก้ไข"><PencilIcon className="w-4 h-4"/></button>
+                                                <button onClick={() => onDelete(e)} className="p-1.5 rounded-lg text-latte hover:text-rust hover:bg-coffee2" title="ลบ"><Trash2Icon className="w-4 h-4"/></button>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // --- App ---
+        function App() {
+            const [currentDate, setCurrentDate] = useState(new Date());
+            const [sheetData, setSheetData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+            const [uiScriptUrl, setUiScriptUrl] = useState(() => localStorage.getItem('hr_script_url') || APPS_SCRIPT_URL);
+            const [isAddLeaveOpen, setIsAddLeaveOpen] = useState(false);
+            const [addLeaveDay, setAddLeaveDay] = useState('');
+            const [view, setView] = useState('dashboard');
+            const [employees, setEmployees] = useState([]);
+            const [empLoading, setEmpLoading] = useState(false);
+            const [isEmpModalOpen, setIsEmpModalOpen] = useState(false);
+            const [editingEmp, setEditingEmp] = useState(null);
+
+            // --- auth ---
+            const [token, setToken] = useState(() => sessionStorage.getItem('hr_token') || '');
+            const [authed, setAuthed] = useState(false);
+            const [authChecking, setAuthChecking] = useState(true);
+            const [loginBusy, setLoginBusy] = useState(false);
+            const [loginError, setLoginError] = useState('');
+
+            // รายชื่อสำหรับ dropdown: ใช้จาก directory ก่อน (ถ้ามี) ไม่งั้น fallback จากธุรกรรม
+            const employeeNames = useMemo(() => {
+                if (employees.length) return employees.map(e => e.name).filter(Boolean).sort();
+                return [...new Set(sheetData.map(d => d.name).filter(Boolean))].sort();
+            }, [employees, sheetData]);
+
+            // ดึงข้อมูลด้วย token; คืน {auth:boolean, ok:boolean}
+            const fetchData = useCallback(async (tk) => {
+                const useToken = tk !== undefined ? tk : token;
+                const targetUrl = uiScriptUrl || APPS_SCRIPT_URL;
+                if (!targetUrl || targetUrl.includes("XXXX")) { setSheetData(MOCK_DATA); return { auth: true, ok: true }; }
+                setLoading(true); setError(null);
+                try {
+                    const response = await fetch(`${targetUrl}?token=${encodeURIComponent(useToken)}&t=${Date.now()}`, { method: "GET", credentials: 'omit' });
+                    if (!response.ok) throw new Error("network");
+                    const json = JSON.parse(await response.text());
+                    if (json && json.error === 'unauthorized') { return { auth: false, ok: false }; }
+                    if (Array.isArray(json)) { setSheetData(json); return { auth: true, ok: true }; }
+                    throw new Error("รูปแบบข้อมูลไม่ถูกต้อง");
+                } catch (err) {
+                    setError("เชื่อมต่อ Google Sheet ไม่ได้");
+                    return { auth: true, ok: false }; // เชื่อมต่อพลาด แต่ token ยังถือว่าใช้ได้
+                } finally { setLoading(false); }
+            }, [uiScriptUrl, token]);
+
+            // โหลดรายชื่อพนักงาน (directory)
+            const loadEmployees = useCallback(async (tk) => {
+                const useToken = tk !== undefined ? tk : token;
+                const targetUrl = uiScriptUrl || APPS_SCRIPT_URL;
+                if (!targetUrl || targetUrl.includes("XXXX")) return;
+                setEmpLoading(true);
+                try {
+                    const data = await postAction(targetUrl, useToken, 'list_employees');
+                    setEmployees(data.employees || []);
+                } catch (e) { /* เงียบไว้ — แสดงว่าง */ }
+                finally { setEmpLoading(false); }
+            }, [uiScriptUrl, token]);
+
+            // เช็ค token ตอนเปิดแอป
+            useEffect(() => {
+                (async () => {
+                    if (!token) { setAuthChecking(false); return; }
+                    const res = await fetchData(token);
+                    if (res.auth) { setAuthed(true); loadEmployees(token); } else { sessionStorage.removeItem('hr_token'); setToken(''); }
+                    setAuthChecking(false);
+                })();
+            }, []);
+
+            const doLogin = async (pass) => {
+                setLoginBusy(true); setLoginError('');
+                const res = await fetchData(pass);
+                if (res.auth) { setToken(pass); sessionStorage.setItem('hr_token', pass); setAuthed(true); loadEmployees(pass); }
+                else setLoginError('รหัสผ่านไม่ถูกต้อง');
+                setLoginBusy(false);
+            };
+
+            const logout = () => { sessionStorage.removeItem('hr_token'); setToken(''); setAuthed(false); setSheetData([]); setEmployees([]); };
+
+            const openAddEmp = () => { setEditingEmp(null); setIsEmpModalOpen(true); };
+            const openEditEmp = (e) => { setEditingEmp(e); setIsEmpModalOpen(true); };
+            const deleteEmp = async (e) => {
+                if (!window.confirm(`ลบ "${e.name}" ออกจากรายชื่อ?\n(ประวัติเบิก/ลาเดิมใน data ยังอยู่)`)) return;
+                try { await postAction(uiScriptUrl || APPS_SCRIPT_URL, token, 'delete_employee', { name: e.name }); loadEmployees(); }
+                catch (err) { alert('ลบไม่สำเร็จ: ' + err.message); }
+            };
+
+            const leaveData = sheetData.filter(d => d.type && d.type.includes('หยุด'));
+            const handleChangeMonth = (delta) => { const n = new Date(currentDate); n.setMonth(n.getMonth() + delta); setCurrentDate(n); };
+            const handleAddLeave = (dateStr) => { setAddLeaveDay(dateStr); setIsAddLeaveOpen(true); };
+
+            const navBtn = "p-2 rounded-full bg-coffee2 text-latte hover:text-cream transition-colors";
+            const tabCls = (a) => `px-3 py-1.5 rounded-md text-sm font-medium transition ${a ? 'bg-ochre text-espresso' : 'text-latte hover:text-cream'}`;
+
+            if (authChecking) {
+                return <div className="min-h-screen flex items-center justify-center bg-espresso text-latte">กำลังโหลด...</div>;
+            }
+            if (!authed) {
+                return <LoginScreen onLogin={doLogin} error={loginError} busy={loginBusy} />;
+            }
+
+            return (
+                <div className="min-h-screen font-sans pb-10 text-cream">
+                    <nav className="no-print bg-coffee border-b border-bean px-4 md:px-6 py-3 flex justify-between items-center sticky top-0 z-50 shadow-sm">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-ochre p-2 rounded-lg"><LayoutDashboardIcon className="w-5 h-5 text-espresso"/></div>
+                            <div>
+                                <h1 className="text-lg md:text-xl font-bold leading-none text-cream">HR Manager</h1>
+                                <div className="text-[10px] md:text-xs mt-0.5">
+                                    {loading ? <span className="text-ochre animate-pulse">● กำลังโหลด...</span>
+                                        : error ? <span className="text-rust">● เชื่อมต่อไม่ได้</span>
+                                        : <span className="text-olive">● Online</span>}
+                                </div>
+                            </div>
+                            <div className="hidden md:flex items-center gap-1 bg-coffee2 rounded-lg p-1 ml-2">
+                                <button onClick={() => setView('dashboard')} className={tabCls(view === 'dashboard')}>แดชบอร์ด</button>
+                                <button onClick={() => setView('directory')} className={tabCls(view === 'directory')}>พนักงาน</button>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => handleAddLeave('')} className="hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-lg bg-ochre text-espresso text-sm font-semibold hover:brightness-110" title="เพิ่มข้อมูล">
+                                <PlusIcon className="w-4 h-4"/> เพิ่มข้อมูล
+                            </button>
+                            <button onClick={() => handleAddLeave('')} className="sm:hidden p-2 rounded-full bg-ochre text-espresso" title="เพิ่มข้อมูล"><PlusIcon className="w-5 h-5"/></button>
+                            <button onClick={() => window.print()} className={navBtn} title="พิมพ์ / PDF">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>
+                            </button>
+                            <button onClick={() => setIsSettingsOpen(true)} className={navBtn} title="ตั้งค่า"><SettingsIcon className="w-5 h-5"/></button>
+                            <button onClick={() => fetchData()} disabled={loading} className={navBtn} title="รีเฟรช"><RefreshCwIcon className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`}/></button>
+                            <button onClick={logout} className={navBtn} title="ออกจากระบบ"><LogOutIcon className="w-5 h-5"/></button>
+                        </div>
+                    </nav>
+
+                    <main className="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
+                        {error && (
+                            <div className="no-print border border-rust/40 bg-rust/10 p-4 rounded-lg">
+                                <div className="flex items-start gap-3">
+                                    <XCircleIcon className="w-6 h-6 text-rust mt-0.5 shrink-0"/>
+                                    <div className="flex-1">
+                                        <h3 className="font-bold text-sm text-rust">เชื่อมต่อข้อมูลจริงไม่ได้</h3>
+                                        <p className="text-xs mt-1 text-rust/80">ตรวจสอบ Apps Script URL ที่ ⚙️ ตั้งค่า หรือเช็คว่า deploy ใหม่แล้ว</p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="md:hidden flex items-center gap-1 bg-coffee2 rounded-lg p-1">
+                            <button onClick={() => setView('dashboard')} className={tabCls(view === 'dashboard') + ' flex-1'}>แดชบอร์ด</button>
+                            <button onClick={() => setView('directory')} className={tabCls(view === 'directory') + ' flex-1'}>พนักงาน</button>
+                        </div>
+
+                        {view === 'dashboard' && (
+                            <>
+                                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                    <div className="lg:col-span-2">
+                                        <CalendarView leaveData={leaveData} currentMonth={currentDate.getMonth()} currentYear={currentDate.getFullYear()} onChangeMonth={handleChangeMonth} onAddLeave={handleAddLeave}/>
+                                    </div>
+                                    <div className="lg:col-span-1">
+                                        <MonthlySummaryTable allData={sheetData} currentMonth={currentDate.getMonth()} currentYear={currentDate.getFullYear()}/>
+                                    </div>
+                                </div>
+                                <TrendCharts allData={sheetData}/>
+                            </>
+                        )}
+
+                        {view === 'directory' && (
+                            <DirectoryView employees={employees} loading={empLoading} onAdd={openAddEmp} onEdit={openEditEmp} onDelete={deleteEmp}/>
+                        )}
+                    </main>
+
+                    <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} uiScriptUrl={uiScriptUrl} setUiScriptUrl={setUiScriptUrl}/>
+                    {isAddLeaveOpen && (
+                        <AddLeaveModal isOpen={isAddLeaveOpen} onClose={() => setIsAddLeaveOpen(false)} initialDate={addLeaveDay}
+                            employeeNames={employeeNames} employees={employees} sheetData={sheetData}
+                            scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} onSuccess={() => fetchData()}/>
+                    )}
+                    <EmployeeModal isOpen={isEmpModalOpen} onClose={() => setIsEmpModalOpen(false)} scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} editing={editingEmp} onSuccess={loadEmployees}/>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
