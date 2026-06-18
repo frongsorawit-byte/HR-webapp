@@ -1291,12 +1291,227 @@
             );
         };
 
+        // --- OT View ---
+        const OTView = ({ scriptUrl, token, employees }) => {
+            const now = new Date();
+            const defaultMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+            const [month, setMonth] = useState(defaultMonth);
+            const [attData, setAttData] = useState([]);
+            const [settings, setSettings] = useState({});
+            const [holidays, setHolidays] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [expandedEmp, setExpandedEmp] = useState(null);
+
+            const loadAll = useCallback(async () => {
+                setLoading(true);
+                try {
+                    const [attRes, settRes, holRes] = await Promise.all([
+                        postAction(scriptUrl, token, 'list_attendance', { month }),
+                        postAction(scriptUrl, token, 'list_settings'),
+                        postAction(scriptUrl, token, 'list_holidays'),
+                    ]);
+                    setAttData(attRes.records || []);
+                    setSettings(settRes.settings || {});
+                    setHolidays(holRes.holidays || []);
+                } catch {} finally { setLoading(false); }
+            }, [scriptUrl, token, month]);
+
+            useEffect(() => { loadAll(); }, [loadAll]);
+
+            const holidayMap = useMemo(() => {
+                const m = {};
+                holidays.forEach(h => { m[h.date] = h; });
+                return m;
+            }, [holidays]);
+
+            const otRate = parseFloat(settings.ot_rate_default) || 50;
+
+            // คำนวณ OT รายคน รายวัน
+            const otSummary = useMemo(() => {
+                const empMap = {};
+                attData.forEach(r => {
+                    if (!r.employee) return;
+                    if (!empMap[r.employee]) empMap[r.employee] = { employee: r.employee, days: [] };
+
+                    const empInfo  = employees.find(e => e.name === r.employee);
+                    const otBonus  = empInfo ? (parseFloat(empInfo.otBonus) || 0) : 0;
+                    const hourRate = otRate + otBonus;
+                    const holiday  = holidayMap[r.date];
+                    const mult     = holiday ? (parseFloat(holiday.multiplier) || 1) : 1;
+                    const holBonus = (holiday && r.otHours > 0) ? (parseFloat(holiday.bonus) || 0) : 0;
+                    const otPay    = r.otHours > 0 ? (r.otHours * hourRate * mult + holBonus) : 0;
+
+                    empMap[r.employee].days.push({
+                        date: r.date, checkIn: r.checkIn, checkOut: r.checkOut,
+                        otHours: r.otHours, hourRate, mult, holBonus, otPay,
+                        isHoliday: !!holiday, holidayNote: holiday ? holiday.note : '',
+                    });
+                });
+                return Object.values(empMap).map(e => {
+                    const empInfo   = employees.find(emp => emp.name === e.employee);
+                    const otBonus   = empInfo ? (parseFloat(empInfo.otBonus) || 0) : 0;
+                    const dept      = empInfo ? (empInfo.department || '') : '';
+                    const totalHours = e.days.reduce((s, d) => s + (d.otHours || 0), 0);
+                    const totalPay   = e.days.reduce((s, d) => s + d.otPay, 0);
+                    return { ...e, dept, otBonus, effectiveRate: otRate + otBonus, totalHours, totalPay };
+                }).filter(e => e.totalHours > 0)
+                  .sort((a, b) => b.totalPay - a.totalPay);
+            }, [attData, employees, otRate, holidayMap]);
+
+            const grand = useMemo(() => ({
+                hours: otSummary.reduce((s, e) => s + e.totalHours, 0),
+                pay:   otSummary.reduce((s, e) => s + e.totalPay, 0),
+            }), [otSummary]);
+
+            const fmt  = (n) => Math.round(n).toLocaleString();
+            const fmtH = (n) => n % 1 === 0 ? n.toString() : n.toFixed(1);
+
+            return (
+                <div className="space-y-4">
+                    {/* Controls */}
+                    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+                        <h2 className="text-lg font-bold text-cream flex items-center gap-2">
+                            <ZapIcon className="w-5 h-5 text-ochre"/> คำนวณ OT
+                            <span className="text-xs font-medium text-latte bg-coffee2 px-2 py-0.5 rounded-full">{otSummary.length} คนมี OT</span>
+                        </h2>
+                        <div className="flex gap-2 items-center flex-wrap">
+                            <span className="text-xs text-latte bg-coffee2 border border-bean px-3 py-1.5 rounded-lg font-mono">
+                                เรต OT: <span className="text-ochre font-bold">{otRate}</span> บ./ชม.
+                            </span>
+                            <input type="month" value={month} onChange={e => setMonth(e.target.value)} className={inputCls + " w-40"}/>
+                            <button onClick={loadAll} disabled={loading} className="p-2 rounded-lg bg-coffee2 text-latte hover:text-cream disabled:opacity-50">
+                                <RefreshCwIcon className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`}/>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Summary cards */}
+                    <div className="grid grid-cols-3 gap-3">
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-2xl font-bold text-ochre">{otSummary.length}</div>
+                            <div className="text-xs text-latte mt-1">คนมี OT</div>
+                        </div>
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-2xl font-bold text-cream">{fmtH(grand.hours)}</div>
+                            <div className="text-xs text-latte mt-1">ชม. OT รวม</div>
+                        </div>
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-2xl font-bold text-olive">฿{fmt(grand.pay)}</div>
+                            <div className="text-xs text-latte mt-1">ค่า OT รวม</div>
+                        </div>
+                    </div>
+
+                    {/* Empty state */}
+                    {!loading && attData.length === 0 && (
+                        <div className="bg-coffee border border-bean rounded-xl p-10 text-center text-latte text-sm space-y-2">
+                            <ZapIcon className="w-12 h-12 mx-auto mb-3 opacity-20"/>
+                            <p className="font-medium">ยังไม่มีข้อมูลเข้างานในเดือนนี้</p>
+                            <p className="text-xs text-latte/60">ต้องมีข้อมูลในแท็บ <span className="font-mono bg-coffee2 px-1.5 py-0.5 rounded text-cream">เข้างาน</span> ก่อน จึงจะคำนวณ OT ได้</p>
+                        </div>
+                    )}
+                    {!loading && attData.length > 0 && otSummary.length === 0 && (
+                        <div className="bg-coffee border border-bean rounded-xl p-8 text-center text-latte text-sm">
+                            <CheckCircleIcon className="w-10 h-10 mx-auto mb-3 opacity-20"/>
+                            <p>ไม่มีพนักงานที่ทำ OT ในเดือนนี้</p>
+                        </div>
+                    )}
+
+                    {/* Table */}
+                    {otSummary.length > 0 && (
+                        <div className="bg-coffee border border-bean rounded-xl overflow-hidden">
+                            {loading ? (
+                                <div className="p-8 text-center text-latte text-sm">กำลังคำนวณ...</div>
+                            ) : (
+                                <table className="w-full text-left border-collapse min-w-[580px]">
+                                    <thead className="bg-coffee2/50">
+                                        <tr>
+                                            <th className="p-3 text-xs font-semibold text-latte uppercase">พนักงาน</th>
+                                            <th className="p-3 text-xs font-semibold text-latte uppercase text-center">เรต (บ./ชม.)</th>
+                                            <th className="p-3 text-xs font-semibold text-latte uppercase text-center">ชม. OT</th>
+                                            <th className="p-3 text-xs font-semibold text-latte uppercase text-right">ค่า OT (บาท)</th>
+                                            <th className="p-3 w-10"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {otSummary.map(e => (
+                                            <React.Fragment key={e.employee}>
+                                                <tr
+                                                    className="border-t border-bean hover:bg-coffee2/40 cursor-pointer transition-colors"
+                                                    onClick={() => setExpandedEmp(expandedEmp === e.employee ? null : e.employee)}
+                                                >
+                                                    <td className="p-3 text-sm text-cream font-medium">
+                                                        <div>{e.employee}</div>
+                                                        {e.dept && <div className="text-[11px] text-ochre">{e.dept}</div>}
+                                                        {e.otBonus > 0 && <div className="text-[10px] text-latte">+{e.otBonus} บ. bonus/ชม.</div>}
+                                                    </td>
+                                                    <td className="p-3 text-sm font-mono text-center">
+                                                        <span className="text-cream">{e.effectiveRate}</span>
+                                                        {e.otBonus > 0 && <span className="text-xs text-latte"> ({otRate}+{e.otBonus})</span>}
+                                                    </td>
+                                                    <td className="p-3 text-sm font-mono text-center font-bold text-cream">{fmtH(e.totalHours)}</td>
+                                                    <td className="p-3 text-sm font-mono text-right font-bold text-olive">฿{fmt(e.totalPay)}</td>
+                                                    <td className="p-3 text-center text-latte text-xs">{expandedEmp === e.employee ? '▲' : '▼'}</td>
+                                                </tr>
+                                                {expandedEmp === e.employee && (
+                                                    <tr className="border-t border-bean/40">
+                                                        <td colSpan={5} className="p-0">
+                                                            <div className="bg-coffee2/30 border-b border-bean">
+                                                                <table className="w-full text-left border-collapse">
+                                                                    <thead>
+                                                                        <tr className="border-b border-bean/40">
+                                                                            <th className="px-6 py-2 text-[10px] text-latte/70 uppercase">วันที่</th>
+                                                                            <th className="px-3 py-2 text-[10px] text-latte/70 uppercase text-center">เข้า-ออก</th>
+                                                                            <th className="px-3 py-2 text-[10px] text-latte/70 uppercase text-center">OT ชม.</th>
+                                                                            <th className="px-3 py-2 text-[10px] text-latte/70 uppercase text-center">เรต × mult</th>
+                                                                            <th className="px-3 py-2 text-[10px] text-latte/70 uppercase text-right">ค่า OT</th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {e.days.filter(d => d.otHours > 0).sort((a,b) => a.date.localeCompare(b.date)).map(d => (
+                                                                            <tr key={d.date} className="border-t border-bean/20 hover:bg-coffee2/20">
+                                                                                <td className="px-6 py-2 text-xs font-mono text-cream">
+                                                                                    {d.date}
+                                                                                    {d.isHoliday && <span className="ml-1.5 text-[9px] bg-caramel/15 text-caramel px-1 rounded">วันพิเศษ{d.holidayNote ? ` (${d.holidayNote})` : ''}</span>}
+                                                                                </td>
+                                                                                <td className="px-3 py-2 text-xs font-mono text-latte text-center">{d.checkIn || '-'}→{d.checkOut || '-'}</td>
+                                                                                <td className="px-3 py-2 text-xs font-mono text-center font-bold text-cream">{fmtH(d.otHours)}</td>
+                                                                                <td className="px-3 py-2 text-xs font-mono text-center text-latte">
+                                                                                    {d.hourRate}{d.mult > 1 ? <span className="text-caramel">×{d.mult}</span> : ''}
+                                                                                    {d.holBonus > 0 && <span className="text-olive ml-1">+{d.holBonus}</span>}
+                                                                                </td>
+                                                                                <td className="px-3 py-2 text-xs font-mono text-right text-olive font-bold">฿{fmt(d.otPay)}</td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                )}
+                                            </React.Fragment>
+                                        ))}
+                                        {/* Grand total row */}
+                                        <tr className="border-t-2 border-ochre/40 bg-coffee2/30">
+                                            <td className="p-3 text-sm font-bold text-cream" colSpan={2}>รวมทั้งหมด</td>
+                                            <td className="p-3 text-sm font-mono text-center font-bold text-cream">{fmtH(grand.hours)}</td>
+                                            <td className="p-3 text-sm font-mono text-right font-bold text-olive">฿{fmt(grand.pay)}</td>
+                                            <td></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         // --- Navigation config (section ทั้งหมด — ready=false คือ placeholder รอ phase หลัง) ---
         const NAV_ITEMS = [
             { key: 'dashboard',  label: 'แดชบอร์ด', Icon: LayoutDashboardIcon, ready: true },
             { key: 'directory',  label: 'พนักงาน',  Icon: UsersIcon,           ready: true },
             { key: 'attendance', label: 'เข้างาน',   Icon: ClockIcon,           ready: true  },
-            { key: 'ot',         label: 'OT',        Icon: ZapIcon,             ready: false },
+            { key: 'ot',         label: 'OT',        Icon: ZapIcon,             ready: true  },
             { key: 'payroll',    label: 'เงินเดือน', Icon: WalletIcon,          ready: false },
             { key: 'settings',   label: 'ตั้งค่า',   Icon: SettingsIcon,        ready: true  },
         ];
@@ -1534,6 +1749,10 @@
 
                             {view === 'attendance' && (
                                 <AttendanceView scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} leaveData={leaveData}/>
+                            )}
+
+                            {view === 'ot' && (
+                                <OTView scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} employees={employees}/>
                             )}
 
                             {view === 'settings' && (
