@@ -1791,6 +1791,307 @@
             );
         };
 
+        // --- Payroll View ---
+        const PayrollView = ({ scriptUrl, token, employees, sheetData }) => {
+            const now = new Date();
+            const defaultMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+
+            const [month, setMonth] = useState(defaultMonth);
+            const [attData, setAttData] = useState([]);
+            const [settings, setSettings] = useState({});
+            const [holidays, setHolidays] = useState([]);
+            const [penalties, setPenalties] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [expandedEmp, setExpandedEmp] = useState(null);
+
+            const loadAll = useCallback(async () => {
+                setLoading(true);
+                try {
+                    const [attRes, settRes, holRes, penRes] = await Promise.all([
+                        postAction(scriptUrl, token, 'list_attendance', { month }),
+                        postAction(scriptUrl, token, 'list_settings'),
+                        postAction(scriptUrl, token, 'list_holidays'),
+                        postAction(scriptUrl, token, 'list_penalties', { month }),
+                    ]);
+                    setAttData(attRes.records || []);
+                    setSettings(settRes.settings || {});
+                    setHolidays(holRes.holidays || []);
+                    setPenalties(penRes.penalties || []);
+                } catch {} finally { setLoading(false); }
+            }, [scriptUrl, token, month]);
+
+            useEffect(() => { loadAll(); }, [loadAll]);
+
+            const payrollData = useMemo(() => {
+                const yr = parseInt(month.split('-')[0]);
+                const mo = parseInt(month.split('-')[1]) - 1;
+                const otRate = parseFloat(settings.ot_rate_default) || 50;
+
+                const holidayMap = {};
+                holidays.forEach(h => { holidayMap[h.date] = h; });
+
+                const attMap = {};
+                attData.forEach(r => {
+                    if (!attMap[r.employee]) attMap[r.employee] = [];
+                    attMap[r.employee].push(r);
+                });
+
+                const penMap = {};
+                penalties.forEach(p => {
+                    if (!p.employee) return;
+                    penMap[p.employee] = (penMap[p.employee] || 0) + (p.amount || 0);
+                });
+
+                const monthLeave = {}, monthDeductHours = {}, monthAdvance = {};
+                (sheetData || []).forEach(d => {
+                    const name = d.name;
+                    if (!name) return;
+                    if (d.type && d.type.includes('หยุด')) {
+                        const dt = parseLeaveDate(d.leaveDate, yr);
+                        if (dt && dt.getMonth() === mo && dt.getFullYear() === yr)
+                            monthLeave[name] = (monthLeave[name] || 0) + (d.durationType === 'ครึ่งวัน' ? 0.5 : 1);
+                    }
+                    if (d.type && (d.type.includes('หัก') || d.type === 'เลิกงานไว')) {
+                        const dt = parseTransDate(d.transDate);
+                        if (dt && dt.getMonth() === mo && dt.getFullYear() === yr)
+                            monthDeductHours[name] = (monthDeductHours[name] || 0) + (parseFloat(d.deductHours) || 0);
+                    }
+                    if (d.type && d.type.includes('เบิก')) {
+                        const dt = parseTransDate(d.transDate);
+                        if (dt && dt.getMonth() === mo && dt.getFullYear() === yr)
+                            monthAdvance[name] = (monthAdvance[name] || 0) + (parseFloat(d.amount) || 0);
+                    }
+                });
+
+                return employees
+                    .filter(e => parseFloat(e.salary) > 0 && e.name)
+                    .map(e => {
+                        const salary   = parseFloat(e.salary) || 0;
+                        const workDays = parseFloat(e.workDays) || 30;
+                        const freeDays = parseFloat(e.freeLeaveDays) || 1;
+                        const daily    = workDays > 0 ? salary / workDays : 0;
+                        const hourly   = daily / 8;
+                        const otBonus  = parseFloat(e.otBonus) || 0;
+                        const hourRate = otRate + otBonus;
+
+                        const leaveDays   = monthLeave[e.name] || 0;
+                        const excessLeave = Math.max(0, leaveDays - freeDays);
+                        const deductHours = monthDeductHours[e.name] || 0;
+                        const penTotal    = penMap[e.name] || 0;
+                        const advance     = monthAdvance[e.name] || 0;
+
+                        let otPay = 0;
+                        (attMap[e.name] || []).forEach(r => {
+                            if ((r.otHours || 0) > 0) {
+                                const hol  = holidayMap[r.date];
+                                const mult = hol ? (parseFloat(hol.multiplier) || 1) : 1;
+                                const hb   = hol ? (parseFloat(hol.bonus) || 0) : 0;
+                                otPay += r.otHours * hourRate * mult + hb;
+                            }
+                        });
+
+                        const deductLeaveAmt = excessLeave * daily;
+                        const deductHoursAmt = deductHours * hourly;
+                        const netPay = salary - deductLeaveAmt - deductHoursAmt - penTotal + otPay - advance;
+
+                        return {
+                            name: e.name, dept: e.department || '',
+                            salary, workDays, freeDays, daily, leaveDays, excessLeave,
+                            deductLeaveAmt, deductHours, deductHoursAmt, penTotal, otPay, advance, netPay, otBonus,
+                        };
+                    })
+                    .sort((a, b) => b.salary - a.salary);
+            }, [employees, attData, settings, holidays, penalties, sheetData, month]);
+
+            const grand = useMemo(() => ({
+                salary:  payrollData.reduce((s, e) => s + e.salary, 0),
+                deduct:  payrollData.reduce((s, e) => s + e.deductLeaveAmt + e.deductHoursAmt + e.penTotal, 0),
+                ot:      payrollData.reduce((s, e) => s + e.otPay, 0),
+                advance: payrollData.reduce((s, e) => s + e.advance, 0),
+                net:     payrollData.reduce((s, e) => s + e.netPay, 0),
+            }), [payrollData]);
+
+            const fmt = (n) => Math.round(n).toLocaleString();
+
+            const exportCSV = () => {
+                const headers = ['ชื่อ','แผนก','เงินเดือน','วันลา','ลาเกินโควต้า','หักลา','หักชม.','ค่าปรับ','OT','เบิก','ยอดจ่ายสุทธิ'];
+                const rows = payrollData.map(e => [
+                    e.name, e.dept, e.salary, e.leaveDays, e.excessLeave,
+                    Math.round(e.deductLeaveAmt), Math.round(e.deductHoursAmt),
+                    Math.round(e.penTotal), Math.round(e.otPay),
+                    Math.round(e.advance), Math.round(e.netPay),
+                ]);
+                const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+                const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = 'payroll-' + month + '.csv'; a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            return (
+                <div className="space-y-4">
+                    {/* Header */}
+                    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+                        <h2 className="text-lg font-bold text-cream flex items-center gap-2">
+                            <WalletIcon className="w-5 h-5 text-ochre"/> คำนวณเงินเดือน
+                            <span className="text-xs font-medium text-latte bg-coffee2 px-2 py-0.5 rounded-full">{payrollData.length} คน</span>
+                        </h2>
+                        <div className="flex gap-2 items-center flex-wrap">
+                            <input type="month" value={month} onChange={e => setMonth(e.target.value)} className={inputCls + " w-40"}/>
+                            <button onClick={loadAll} disabled={loading} className="p-2 rounded-lg bg-coffee2 text-latte hover:text-cream disabled:opacity-50" title="รีเฟรช">
+                                <RefreshCwIcon className={'w-4 h-4 ' + (loading ? 'animate-spin' : '')}/>
+                            </button>
+                            {payrollData.length > 0 && (
+                                <button onClick={exportCSV} className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-olive/20 text-olive border border-olive/30 text-sm font-medium hover:bg-olive/30">
+                                    <FileSpreadsheetIcon className="w-4 h-4"/> Export CSV
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Summary cards */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-xl font-bold text-cream">฿{fmt(grand.salary)}</div>
+                            <div className="text-xs text-latte mt-1">ฐานเงินเดือนรวม</div>
+                        </div>
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-xl font-bold text-rust">−฿{fmt(grand.deduct)}</div>
+                            <div className="text-xs text-latte mt-1">หักรวม (ลา+ชม.+ปรับ)</div>
+                        </div>
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-xl font-bold text-olive">+฿{fmt(grand.ot)}</div>
+                            <div className="text-xs text-latte mt-1">OT รวม</div>
+                        </div>
+                        <div className="bg-coffee border border-bean rounded-xl p-4 text-center">
+                            <div className="text-xl font-bold text-ochre">฿{fmt(grand.net)}</div>
+                            <div className="text-xs text-latte mt-1">ยอดจ่ายสุทธิรวม</div>
+                        </div>
+                    </div>
+
+                    {/* Empty state */}
+                    {!loading && payrollData.length === 0 && (
+                        <div className="bg-coffee border border-bean rounded-xl p-10 text-center text-latte text-sm space-y-2">
+                            <WalletIcon className="w-12 h-12 mx-auto mb-3 opacity-20"/>
+                            <p className="font-medium">ยังไม่มีพนักงานที่มีข้อมูลเงินเดือน</p>
+                            <p className="text-xs text-latte/60">กรอกเงินเดือนให้พนักงานก่อนที่หน้า "พนักงาน"</p>
+                        </div>
+                    )}
+
+                    {/* Table */}
+                    {payrollData.length > 0 && (
+                        <div className="bg-coffee border border-bean rounded-xl overflow-hidden">
+                            {loading ? (
+                                <div className="p-8 text-center text-latte text-sm">กำลังคำนวณ...</div>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left border-collapse min-w-[700px]">
+                                        <thead className="bg-coffee2/50">
+                                            <tr>
+                                                <th className="p-3 text-xs font-semibold text-latte uppercase">ชื่อ</th>
+                                                <th className="p-3 text-xs font-semibold text-latte uppercase text-right">เงินเดือน</th>
+                                                <th className="p-3 text-xs font-semibold text-rust uppercase text-right">หักรวม</th>
+                                                <th className="p-3 text-xs font-semibold text-olive uppercase text-right">OT</th>
+                                                <th className="p-3 text-xs font-semibold text-caramel uppercase text-right">เบิก</th>
+                                                <th className="p-3 text-xs font-semibold text-ochre uppercase text-right">ยอดจ่าย</th>
+                                                <th className="p-3 w-10"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {payrollData.map(e => {
+                                                const deductTotal = e.deductLeaveAmt + e.deductHoursAmt + e.penTotal;
+                                                const isExpanded = expandedEmp === e.name;
+                                                return (
+                                                    <React.Fragment key={e.name}>
+                                                        <tr className="border-t border-bean hover:bg-coffee2/40 cursor-pointer transition-colors"
+                                                            onClick={() => setExpandedEmp(isExpanded ? null : e.name)}>
+                                                            <td className="p-3 text-sm text-cream font-medium">
+                                                                <div>{e.name}</div>
+                                                                {e.dept && <div className="text-[11px] text-ochre">{e.dept}</div>}
+                                                            </td>
+                                                            <td className="p-3 text-sm font-mono text-right text-cream">{fmt(e.salary)}</td>
+                                                            <td className="p-3 text-sm font-mono text-right font-bold">
+                                                                {deductTotal > 0 ? <span className="text-rust">−{fmt(deductTotal)}</span> : <span className="text-latte/40">-</span>}
+                                                            </td>
+                                                            <td className="p-3 text-sm font-mono text-right">
+                                                                {e.otPay > 0 ? <span className="text-olive">+{fmt(e.otPay)}</span> : <span className="text-latte/40">-</span>}
+                                                            </td>
+                                                            <td className="p-3 text-sm font-mono text-right">
+                                                                {e.advance > 0 ? <span className="text-caramel">{fmt(e.advance)}</span> : <span className="text-latte/40">-</span>}
+                                                            </td>
+                                                            <td className="p-3 text-sm font-mono text-right font-bold text-ochre">฿{fmt(e.netPay)}</td>
+                                                            <td className="p-3 text-center text-latte text-xs">{isExpanded ? '▲' : '▼'}</td>
+                                                        </tr>
+                                                        {isExpanded && (
+                                                            <tr className="border-t border-bean/40">
+                                                                <td colSpan={7} className="p-0">
+                                                                    <div className="bg-coffee2/20 border-b border-bean px-6 py-4 text-xs space-y-2">
+                                                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-8 gap-y-1.5 text-latte">
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span>เงินเดือนฐาน</span>
+                                                                                <span className="font-mono text-cream">฿{fmt(e.salary)}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span>อัตราต่อวัน</span>
+                                                                                <span className="font-mono text-cream">฿{fmt(e.daily)}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span>วันลา / โควต้า</span>
+                                                                                <span className="font-mono text-cream">{e.leaveDays} / {e.freeDays} วัน</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span className="text-rust">หักลาเกิน ({e.excessLeave} วัน)</span>
+                                                                                <span className="font-mono text-rust">−฿{fmt(e.deductLeaveAmt)}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span className="text-rust">หักชั่วโมง ({e.deductHours} ชม.)</span>
+                                                                                <span className="font-mono text-rust">−฿{fmt(e.deductHoursAmt)}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span className="text-rust">ค่าปรับแพ็คผิด</span>
+                                                                                <span className="font-mono text-rust">−฿{fmt(e.penTotal)}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span className="text-olive">{'OT' + (e.otBonus > 0 ? ' (+' + e.otBonus + ' bonus/ชม.)' : '')}</span>
+                                                                                <span className="font-mono text-olive">+฿{fmt(e.otPay)}</span>
+                                                                            </div>
+                                                                            <div className="flex justify-between gap-4">
+                                                                                <span className="text-caramel">หักเบิกล่วงหน้า</span>
+                                                                                <span className="font-mono text-caramel">−฿{fmt(e.advance)}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className="border-t border-bean/40 pt-2 flex justify-between font-bold text-sm">
+                                                                            <span className="text-cream">ยอดจ่ายสุทธิ</span>
+                                                                            <span className={'font-mono ' + (e.netPay >= 0 ? 'text-ochre' : 'text-rust')}>฿{fmt(e.netPay)}</span>
+                                                                        </div>
+                                                                    </div>
+                                                                </td>
+                                                            </tr>
+                                                        )}
+                                                    </React.Fragment>
+                                                );
+                                            })}
+                                            {/* Grand total */}
+                                            <tr className="border-t-2 border-ochre/40 bg-coffee2/30">
+                                                <td className="p-3 text-sm font-bold text-cream">รวม ({payrollData.length} คน)</td>
+                                                <td className="p-3 text-sm font-mono text-right font-bold text-cream">฿{fmt(grand.salary)}</td>
+                                                <td className="p-3 text-sm font-mono text-right font-bold text-rust">{grand.deduct > 0 ? '−' + fmt(grand.deduct) : '-'}</td>
+                                                <td className="p-3 text-sm font-mono text-right font-bold text-olive">{grand.ot > 0 ? '+' + fmt(grand.ot) : '-'}</td>
+                                                <td className="p-3 text-sm font-mono text-right font-bold text-caramel">{grand.advance > 0 ? fmt(grand.advance) : '-'}</td>
+                                                <td className="p-3 text-sm font-mono text-right font-bold text-ochre">฿{fmt(grand.net)}</td>
+                                                <td></td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
         // --- Navigation config (section ทั้งหมด — ready=false คือ placeholder รอ phase หลัง) ---
         const NAV_ITEMS = [
             { key: 'dashboard',  label: 'แดชบอร์ด', Icon: LayoutDashboardIcon, ready: true },
@@ -1798,7 +2099,7 @@
             { key: 'attendance', label: 'เข้างาน',   Icon: ClockIcon,           ready: true  },
             { key: 'ot',         label: 'OT',        Icon: ZapIcon,             ready: true  },
             { key: 'penalty',    label: 'ค่าปรับ',   Icon: AlertTriangleIcon,   ready: true  },
-            { key: 'payroll',    label: 'เงินเดือน', Icon: WalletIcon,          ready: false },
+            { key: 'payroll',    label: 'เงินเดือน', Icon: WalletIcon,          ready: true  },
             { key: 'settings',   label: 'ตั้งค่า',   Icon: SettingsIcon,        ready: true  },
         ];
 
@@ -2043,6 +2344,10 @@
 
                             {view === 'penalty' && (
                                 <PenaltyView scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} employees={employees} departments={departments}/>
+                            )}
+
+                            {view === 'payroll' && (
+                                <PayrollView scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} employees={employees} sheetData={sheetData}/>
                             )}
 
                             {view === 'settings' && (
