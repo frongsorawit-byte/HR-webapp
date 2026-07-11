@@ -1179,6 +1179,7 @@
             const [chartMetric, setChartMetric] = useState('ot');
 
             const isForgotOut = (r) => (r.note || '').includes('ลืมสแกนออก');
+            const isForgotIn = (r) => (r.note || '').includes('ลืมสแกนเข้า');
             const hhmmToMin = (t) => { const m = /^(\d{1,2}):(\d{2})/.exec(String(t || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
             const minToHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(Math.round(mins % 60)).padStart(2, '0')}`;
             const avgOf = (arr) => arr.length ? minToHHMM(arr.reduce((a, b) => a + b, 0) / arr.length) : '-';
@@ -1196,14 +1197,15 @@
                     const name = r.employee || '(ยังไม่ระบุชื่อ)';
                     const s = map[name] = map[name] || {
                         name, dept: deptOf[name] || 'ไม่ระบุ',
-                        present: 0, late: 0, lateMin: 0, absent: 0, forgotOut: 0, ot: 0,
+                        present: 0, late: 0, lateMin: 0, absent: 0, forgotOut: 0, forgotIn: 0, ot: 0,
                         inMins: [], outMins: [],
                     };
                     if (r.status === 'ขาด') { s.absent++; return; }
                     s.present++;
                     if ((r.lateMin || 0) > 0) { s.late++; s.lateMin += r.lateMin; }
                     s.ot += r.otHours || 0;
-                    const im = hhmmToMin(r.checkIn); if (im != null) s.inMins.push(im);
+                    if (isForgotIn(r)) s.forgotIn++;
+                    else { const im = hhmmToMin(r.checkIn); if (im != null) s.inMins.push(im); }
                     if (isForgotOut(r)) s.forgotOut++;
                     else { const om = hhmmToMin(r.checkOut); if (om != null) s.outMins.push(om); }
                 });
@@ -1220,12 +1222,12 @@
                 personStats.forEach(p => {
                     const s = map[p.dept] = map[p.dept] || {
                         dept: p.dept, label: p.dept, people: 0,
-                        present: 0, late: 0, lateMin: 0, absent: 0, forgotOut: 0, ot: 0,
+                        present: 0, late: 0, lateMin: 0, absent: 0, forgotOut: 0, forgotIn: 0, ot: 0,
                         inMins: [], outMins: [],
                     };
                     s.people++;
                     s.present += p.present; s.late += p.late; s.lateMin += p.lateMin;
-                    s.absent += p.absent; s.forgotOut += p.forgotOut; s.ot += p.ot;
+                    s.absent += p.absent; s.forgotOut += p.forgotOut; s.forgotIn += p.forgotIn; s.ot += p.ot;
                     s.inMins.push(...p.inMins); s.outMins.push(...p.outMins);
                 });
                 return Object.values(map).map(s => ({
@@ -1254,6 +1256,7 @@
                 late:      { label: 'สาย (ครั้ง)',     color: '#D08C45' },
                 present:   { label: 'วันมาทำงาน',      color: '#8A9A5B' },
                 forgotOut: { label: 'ลืมสแกนออก (วัน)', color: '#AE5547' },
+                forgotIn:  { label: 'ลืมสแกนเข้า (วัน)', color: '#AE5547' },
             };
 
             const statChartRef = useRef(null);
@@ -1383,7 +1386,10 @@
                                                             <div>{r.employee}</div>
                                                             {hasLeave && <span className="text-[10px] bg-caramel/15 text-caramel px-1.5 py-0.5 rounded">มีใบลา</span>}
                                                         </td>
-                                                        <td className="p-3 text-sm text-latte font-mono text-center">{r.checkIn || '-'}</td>
+                                                        <td className="p-3 text-sm text-latte font-mono text-center">
+                                                            {r.checkIn || '-'}
+                                                            {isForgotIn(r) && <div className="text-[9px] text-caramel font-sans leading-tight">ลืมสแกนเข้า</div>}
+                                                        </td>
                                                         <td className="p-3 text-sm text-latte font-mono text-center">
                                                             {r.checkOut || '-'}
                                                             {isForgotOut(r) && <div className="text-[9px] text-caramel font-sans leading-tight">ลืมสแกนออก</div>}
@@ -1454,6 +1460,7 @@
                                                 <th className="p-3 text-xs font-semibold text-latte uppercase text-center">สายรวม (นาที)</th>
                                                 <th className="p-3 text-xs font-semibold text-latte uppercase text-center">สาย %</th>
                                                 <th className="p-3 text-xs font-semibold text-latte uppercase text-center">OT (ชม.)</th>
+                                                <th className="p-3 text-xs font-semibold text-latte uppercase text-center">ลืมสแกนเข้า</th>
                                                 <th className="p-3 text-xs font-semibold text-latte uppercase text-center">ลืมสแกนออก</th>
                                                 <th className="p-3 text-xs font-semibold text-latte uppercase text-center">เข้าเฉลี่ย</th>
                                                 <th className="p-3 text-xs font-semibold text-latte uppercase text-center">ออกเฉลี่ย</th>
@@ -1472,13 +1479,14 @@
                                                     <td className="p-3 text-sm text-center font-mono">{s.lateMin ? <span className="text-caramel">{s.lateMin}</span> : <span className="text-latte/40">-</span>}</td>
                                                     <td className="p-3 text-sm text-center font-mono">{s.lateRate ? <span className={s.lateRate >= 30 ? 'text-rust font-bold' : 'text-caramel'}>{s.lateRate}%</span> : <span className="text-latte/40">-</span>}</td>
                                                     <td className="p-3 text-sm text-center font-mono">{s.ot ? <span className="text-ochre font-bold">{s.ot.toFixed(1)}</span> : <span className="text-latte/40">-</span>}</td>
+                                                    <td className="p-3 text-sm text-center font-mono">{s.forgotIn ? <span className="text-rust">{s.forgotIn}</span> : <span className="text-latte/40">-</span>}</td>
                                                     <td className="p-3 text-sm text-center font-mono">{s.forgotOut ? <span className="text-rust">{s.forgotOut}</span> : <span className="text-latte/40">-</span>}</td>
                                                     <td className="p-3 text-sm text-center text-cream font-mono">{s.avgIn}</td>
                                                     <td className="p-3 text-sm text-center text-cream font-mono">{s.avgOut}</td>
                                                 </tr>
                                             ))}
                                             {visibleStats.length === 0 && (
-                                                <tr><td colSpan={statMode === 'dept' ? 10 : 9} className="p-8 text-center text-latte text-sm">ไม่มีข้อมูลในเดือนนี้</td></tr>
+                                                <tr><td colSpan={statMode === 'dept' ? 11 : 10} className="p-8 text-center text-latte text-sm">ไม่มีข้อมูลในเดือนนี้</td></tr>
                                             )}
                                         </tbody>
                                     </table>
