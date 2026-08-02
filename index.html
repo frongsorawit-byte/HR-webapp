@@ -1178,8 +1178,10 @@
             const [selDepts, setSelDepts]       = useState(new Set());
             const [chartMetric, setChartMetric] = useState('ot');
 
-            const isForgotOut = (r) => (r.note || '').includes('ลืมสแกนออก');
-            const isForgotIn = (r) => (r.note || '').includes('ลืมสแกนเข้า');
+            // ลืมสแกน: เช็คจาก field ตรงๆ — note จริงเขียน "สแกนครั้งเดียว (ไม่มีเวลาออก/เข้า)" ไม่ใช่ "ลืมสแกน..." (substring เดิม match ไม่เจอ → กราฟว่าง)
+            const todayISO = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+            const isForgotOut = (r) => !!r.checkIn && !r.checkOut && r.date < todayISO; // มีเข้า ไม่มีออก (ข้ามวันนี้ที่ยังไม่เลิกงาน)
+            const isForgotIn  = (r) => !r.checkIn && !!r.checkOut;                       // มีออก ไม่มีเข้า
             const hhmmToMin = (t) => { const m = /^(\d{1,2}):(\d{2})/.exec(String(t || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
             const minToHHMM = (mins) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(Math.round(mins % 60)).padStart(2, '0')}`;
             const avgOf = (arr) => arr.length ? minToHHMM(arr.reduce((a, b) => a + b, 0) / arr.length) : '-';
@@ -2205,7 +2207,7 @@
             };
 
             // ── บันทึกทุกแถวที่แก้ ──
-            const today = new Date().toISOString().slice(0, 10);
+            const today = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`; // local date — ไม่ใช้ toISOString (UTC) กันวันเพี้ยนช่วงเช้ามืด
             const saveAll = async () => {
                 if (dirty.size === 0) { showMsg('ไม่มีรายการที่ต้องบันทึก', true); return; }
                 const rows = payrollData.filter(e => dirty.has(e.name)).map(e => {
