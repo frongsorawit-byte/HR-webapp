@@ -2274,7 +2274,10 @@
                 try {
                     await postAction(scriptUrl, token, 'save_payroll_run', { month, rows });
                     showMsg('บันทึก ' + rows.length + ' รายการเรียบร้อย', true);
-                    await loadAll();
+                    // เร็วขึ้น: อัปเดต savedRuns จาก rows ที่เพิ่งบันทึกในเครื่องเลย — ไม่ reload ทั้งหมด (เดิม loadAll = 5 API calls ทำให้ช้า)
+                    setSavedRuns(prev => { const m = { ...prev }; rows.forEach(r => { m[r.employee] = r; }); return m; });
+                    setDrafts({});
+                    setDirty(new Set());
                 } catch (err) {
                     showMsg('บันทึกไม่สำเร็จ: ' + err.message, false);
                 } finally { setSaving(false); }
@@ -2304,9 +2307,14 @@
 
             const numCls = "w-24 px-2 py-1 text-sm text-right font-mono border border-bean rounded-md bg-coffee2 text-cream placeholder-latte/40 focus:outline-none focus:ring-1 focus:ring-ochre/60";
             const [search, setSearch] = useState('');
-            const visibleData = search.trim()
-                ? payrollData.filter(e => e.name.toLowerCase().includes(search.trim().toLowerCase()) || (e.dept && e.dept.toLowerCase().includes(search.trim().toLowerCase())))
+            const [selectedNames, setSelectedNames] = useState(() => new Set());
+            const [filterOpen, setFilterOpen] = useState(false);
+            const toggleFilterName = (name) => setSelectedNames(prev => { const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s; });
+            const visibleData = selectedNames.size
+                ? payrollData.filter(e => selectedNames.has(e.name))
                 : payrollData;
+            // รายชื่อในดรอปดาวน์ = กรองตามที่พิมพ์ (พิมพ์เพื่อหา แล้วติ๊กเลือกได้หลายคน)
+            const filterMatches = payrollData.filter(e => !search.trim() || e.name.toLowerCase().includes(search.trim().toLowerCase()) || (e.dept && e.dept.toLowerCase().includes(search.trim().toLowerCase())));
             const paidCount = payrollData.filter(e => curPaid(e)).length;
 
             return (
@@ -2452,13 +2460,37 @@
                         </div>
                     )}
 
-                    {/* Search */}
+                    {/* Filter — พิมพ์ชื่อแล้วติ๊กเลือกได้หลายคน (แบบ Google Sheets filter) */}
                     {payrollData.length > 0 && (
                         <div className="relative">
-                            <input type="text" value={search} onChange={e => setSearch(e.target.value)}
-                                placeholder="🔍 ค้นหาชื่อหรือแผนก..." className={inputCls}/>
-                            {search && (
-                                <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-latte hover:text-cream text-lg leading-none">×</button>
+                            {filterOpen && <div className="fixed inset-0 z-20" onClick={() => setFilterOpen(false)}/>}
+                            <div className="relative z-30 flex flex-wrap items-center gap-1.5 rounded-lg border border-bean bg-coffee2 px-2 py-1.5 min-h-[42px]">
+                                {[...selectedNames].map(n => (
+                                    <span key={n} className="flex items-center gap-1 bg-ochre/20 text-ochre text-xs rounded px-2 py-1 font-medium">
+                                        {n}<button onClick={() => toggleFilterName(n)} className="hover:text-cream leading-none">×</button>
+                                    </span>
+                                ))}
+                                <input type="text" value={search} onChange={e => { setSearch(e.target.value); setFilterOpen(true); }} onFocus={() => setFilterOpen(true)}
+                                    placeholder={selectedNames.size ? 'เพิ่มชื่อ...' : '🔍 กรองชื่อ — พิมพ์แล้วติ๊ก เลือกได้หลายคน'}
+                                    className="flex-1 min-w-[140px] bg-transparent text-sm text-cream placeholder-latte/50 outline-none px-1 py-1"/>
+                                {selectedNames.size > 0 && <button onClick={() => { setSelectedNames(new Set()); setSearch(''); }} className="text-xs text-latte hover:text-rust px-1 whitespace-nowrap">ล้าง ({selectedNames.size})</button>}
+                            </div>
+                            {filterOpen && (
+                                <div className="absolute z-30 mt-1 w-full max-h-64 overflow-y-auto rounded-lg border border-bean bg-coffee shadow-xl">
+                                    {filterMatches.map(e => (
+                                        <button key={e.name} onClick={() => toggleFilterName(e.name)}
+                                            className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-coffee2 transition-colors">
+                                            <span className={'w-4 h-4 rounded border flex items-center justify-center text-[10px] shrink-0 ' + (selectedNames.has(e.name) ? 'bg-ochre border-ochre text-espresso' : 'border-latte/40')}>{selectedNames.has(e.name) ? '✓' : ''}</span>
+                                            <span className="text-sm text-cream">{e.name}</span>
+                                            {e.dept && <span className="text-[11px] text-latte ml-auto">{e.dept}</span>}
+                                        </button>
+                                    ))}
+                                    {filterMatches.length === 0 && <div className="px-3 py-3 text-sm text-latte text-center">ไม่พบชื่อ "{search}"</div>}
+                                    <div className="sticky bottom-0 border-t border-bean bg-coffee px-3 py-1.5 flex justify-between items-center">
+                                        <span className="text-[11px] text-latte">{selectedNames.size ? 'เลือก ' + selectedNames.size + ' คน' : 'ไม่เลือก = แสดงทั้งหมด'}</span>
+                                        <button onClick={() => setFilterOpen(false)} className="text-xs font-medium text-ochre hover:text-cream">เสร็จ</button>
+                                    </div>
+                                </div>
                             )}
                         </div>
                     )}
