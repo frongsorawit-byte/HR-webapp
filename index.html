@@ -2642,6 +2642,198 @@
             );
         };
 
+        // --- Reconciliation View (#5) — จอเดียวรวม 3 สัญญาณ: สแกน / ขอลา LINE / สถานะสรุป ---
+        // ต่อยอด #1 (dayOff auto จาก attendance) + #3 (ลืมสแกน) + #4 (leaveData resolved ผ่าน LINE id/ชื่อ)
+        const STATUS_DEFS = {
+            'มาปกติ':      { cls: 'bg-olive/15 text-olive',            short: '✓' },
+            'ลืมสแกนเข้า': { cls: 'bg-caramel/20 text-caramel',         short: 'FI' },
+            'ลืมสแกนออก':  { cls: 'bg-caramel/20 text-caramel',         short: 'FO' },
+            'หยุด(มีขอ)':  { cls: 'bg-coffee2 text-latte',              short: 'L' },
+            'น่าสงสัย':    { cls: 'bg-rust/25 text-rust font-bold',     short: '?' },
+            '-':           { cls: 'bg-coffee2/30 text-latte/30',       short: '' },   // ยังไม่ถึงวันนี้
+        };
+
+        const ReconciliationView = ({ scriptUrl, token, leaveData, employees = [] }) => {
+            const now = new Date();
+            const defaultMonth = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+            const [month, setMonth] = useState(defaultMonth);
+            const [attData, setAttData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [search, setSearch] = useState('');
+            const [expandedEmp, setExpandedEmp] = useState(null);
+
+            const loadAtt = useCallback(async () => {
+                setLoading(true);
+                try {
+                    const d = await postAction(scriptUrl, token, 'list_attendance', { month });
+                    setAttData(d.records || []);
+                } catch {} finally { setLoading(false); }
+            }, [scriptUrl, token, month]);
+            useEffect(() => { loadAtt(); }, [loadAtt]);
+
+            const isForgotOut = (r) => !!r.checkIn && !r.checkOut;
+            const isForgotIn  = (r) => !r.checkIn && !!r.checkOut;
+
+            const [yr, moNum] = month.split('-').map(Number);
+            const daysInMonth = new Date(yr, moNum, 0).getDate();
+            const isCurrentMonth = (yr === now.getFullYear() && moNum === (now.getMonth() + 1));
+            const lastDay = isCurrentMonth ? now.getDate() : daysInMonth;
+
+            // key = "ชื่อ|yyyy-mm-dd" — attendance ต่อวัน
+            const attByKey = useMemo(() => {
+                const m = {};
+                attData.forEach(r => { m[`${r.employee}|${r.date}`] = r; });
+                return m;
+            }, [attData]);
+
+            // key = "ชื่อ|yyyy-mm-dd" — คำขอหยุดทาง LINE ต่อวัน (leaveData ผ่านการ resolve ชื่อจาก #4 มาแล้วจาก App level)
+            const leaveByKey = useMemo(() => {
+                const m = {};
+                leaveData.forEach(r => {
+                    const d = parseLeaveDate(r.leaveDate, yr);
+                    if (!d) return;
+                    const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                    (m[`${r.name}|${ds}`] = m[`${r.name}|${ds}`] || []).push(r);
+                });
+                return m;
+            }, [leaveData, yr]);
+
+            // สรุปต่อคน: ไล่ทุกวันในเดือน (ถึงวันนี้ถ้าเดือนปัจจุบัน) ตัดสิน status ต่อวัน
+            const perEmp = useMemo(() => {
+                return employees.filter(e => e.name).map(emp => {
+                    let present = 0, forgot = 0, leaveOk = 0, suspicious = 0;
+                    const days = [];
+                    for (let d = 1; d <= lastDay; d++) {
+                        const ds  = `${yr}-${String(moNum).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                        const att = attByKey[`${emp.name}|${ds}`];
+                        const leaves = leaveByKey[`${emp.name}|${ds}`] || [];
+                        let status;
+                        if (att && att.status !== 'ขาด') {
+                            if (isForgotIn(att))       { status = 'ลืมสแกนเข้า'; forgot++; }
+                            else if (isForgotOut(att)) { status = 'ลืมสแกนออก'; forgot++; }
+                            else                        { status = 'มาปกติ'; present++; }
+                        } else if (leaves.length) {
+                            status = 'หยุด(มีขอ)'; leaveOk++;
+                        } else {
+                            status = 'น่าสงสัย'; suspicious++;
+                        }
+                        days.push({ day: d, date: ds, status, att, leaves });
+                    }
+                    return { name: emp.name, dept: emp.department || '', present, forgot, leaveOk, suspicious, days };
+                }).sort((a, b) => b.suspicious - a.suspicious || b.forgot - a.forgot || a.name.localeCompare(b.name, 'th'));
+            }, [employees, attByKey, leaveByKey, lastDay, yr, moNum]);
+
+            const filtered = search.trim()
+                ? perEmp.filter(e => e.name.toLowerCase().includes(search.trim().toLowerCase()) || (e.dept || '').toLowerCase().includes(search.trim().toLowerCase()))
+                : perEmp;
+
+            const totalSuspicious = perEmp.reduce((s, e) => s + e.suspicious, 0);
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
+                        <h2 className="text-lg font-bold text-cream flex items-center gap-2">
+                            <CheckCircleIcon className="w-5 h-5 text-ochre"/> รีเช็คสิ้นเดือน
+                        </h2>
+                        <div className="flex items-center gap-2">
+                            <input type="month" value={month} onChange={e => setMonth(e.target.value)}
+                                className="px-3 py-2 rounded-lg bg-coffee2 border border-bean text-cream text-sm"/>
+                        </div>
+                    </div>
+
+                    {totalSuspicious > 0 && (
+                        <div className="flex items-center gap-2 rounded-xl border border-rust/40 bg-rust/10 px-4 py-3">
+                            <AlertTriangleIcon className="w-5 h-5 text-rust shrink-0"/>
+                            <span className="text-sm text-rust"><b>{totalSuspicious}</b> วัน-คน ที่ไม่มาและไม่ได้ขอลา (น่าสงสัย) — ควรเช็คกับพนักงานก่อนปิดเงินเดือน</span>
+                        </div>
+                    )}
+
+                    <div className="flex items-center gap-3 flex-wrap text-xs text-latte">
+                        {Object.entries(STATUS_DEFS).filter(([k]) => k !== '-').map(([k, v]) => (
+                            <span key={k} className={`px-2 py-1 rounded ${v.cls}`}>{k}</span>
+                        ))}
+                    </div>
+
+                    <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+                        placeholder="🔍 ค้นหาชื่อหรือแผนก..." className="w-full px-3 py-2 rounded-lg bg-coffee2 border border-bean text-cream text-sm placeholder-latte/40"/>
+
+                    <div className="bg-coffee border border-bean rounded-xl overflow-hidden">
+                        {loading ? (
+                            <div className="p-8 text-center text-latte text-sm">กำลังโหลด...</div>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-left border-collapse min-w-[720px]">
+                                    <thead className="bg-coffee2/50">
+                                        <tr>
+                                            <th className="p-3 text-xs font-semibold text-latte uppercase">ชื่อ</th>
+                                            <th className="p-3 text-xs font-semibold text-olive uppercase text-center">มาปกติ</th>
+                                            <th className="p-3 text-xs font-semibold text-caramel uppercase text-center">ลืมสแกน</th>
+                                            <th className="p-3 text-xs font-semibold text-latte uppercase text-center">หยุด(มีขอ)</th>
+                                            <th className="p-3 text-xs font-semibold text-rust uppercase text-center">น่าสงสัย</th>
+                                            <th className="p-3 w-10"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {filtered.map(e => {
+                                            const isExp = expandedEmp === e.name;
+                                            return (
+                                                <React.Fragment key={e.name}>
+                                                    <tr className="border-t border-bean hover:bg-coffee2/40 cursor-pointer" onClick={() => setExpandedEmp(isExp ? null : e.name)}>
+                                                        <td className="p-3 text-sm text-cream font-medium">
+                                                            {e.name}
+                                                            {e.dept && <div className="text-[11px] text-ochre">{e.dept}</div>}
+                                                        </td>
+                                                        <td className="p-3 text-sm text-center font-mono text-olive">{e.present}</td>
+                                                        <td className="p-3 text-sm text-center font-mono">{e.forgot ? <span className="text-caramel font-bold">{e.forgot}</span> : <span className="text-latte/40">-</span>}</td>
+                                                        <td className="p-3 text-sm text-center font-mono">{e.leaveOk ? <span className="text-latte">{e.leaveOk}</span> : <span className="text-latte/40">-</span>}</td>
+                                                        <td className="p-3 text-sm text-center font-mono">{e.suspicious ? <span className="text-rust font-bold">{e.suspicious}</span> : <span className="text-latte/40">-</span>}</td>
+                                                        <td className="p-3 text-center text-latte text-xs">{isExp ? '▲' : '▼'}</td>
+                                                    </tr>
+                                                    {isExp && (
+                                                        <tr className="border-t border-bean/40">
+                                                            <td colSpan={6} className="p-0">
+                                                                <div className="bg-coffee2/20 border-b border-bean px-6 py-4">
+                                                                    <div className="grid grid-cols-7 sm:grid-cols-10 gap-1.5">
+                                                                        {e.days.map(d => {
+                                                                            const def = STATUS_DEFS[d.status];
+                                                                            const title = d.status === 'หยุด(มีขอ)'
+                                                                                ? `${d.date}: ${d.leaves.map(l => l.durationType || '').join(', ') || 'ขอหยุด'}`
+                                                                                : d.status === 'มาปกติ'
+                                                                                ? `${d.date}: เข้า ${d.att.checkIn || '-'} ออก ${d.att.checkOut || '-'}`
+                                                                                : `${d.date}: ${d.status}`;
+                                                                            return (
+                                                                                <div key={d.day} title={title}
+                                                                                    className={`aspect-square rounded flex flex-col items-center justify-center text-[10px] ${def.cls}`}>
+                                                                                    <div className="font-mono">{d.day}</div>
+                                                                                    {def.short && <div className="text-[9px] leading-none">{def.short}</div>}
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </React.Fragment>
+                                            );
+                                        })}
+                                        {filtered.length === 0 && (
+                                            <tr><td colSpan={6} className="p-8 text-center text-latte text-sm">ไม่มีข้อมูล</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+
+                    <p className="text-xs text-latte/60">
+                        <b>วันหยุดที่ใช้หักเงินเดือน</b> คำนวณจากการสแกนจริง (ดูที่หน้าเงินเดือน คอลัมน์ "วันหยุด") —
+                        หน้านี้ช่วยดูภาพรวมก่อนตัดสินใจแก้ตัวเลขในหน้าเงินเดือนเท่านั้น ไม่เขียนข้อมูลอัตโนมัติ
+                    </p>
+                </div>
+            );
+        };
+
         // --- Navigation config (section ทั้งหมด — ready=false คือ placeholder รอ phase หลัง) ---
         const NAV_ITEMS = [
             { key: 'dashboard',  label: 'แดชบอร์ด', Icon: LayoutDashboardIcon, ready: true },
@@ -2650,6 +2842,7 @@
             { key: 'ot',         label: 'OT',        Icon: ZapIcon,             ready: true  },
             { key: 'penalty',    label: 'ค่าปรับ',   Icon: AlertTriangleIcon,   ready: true  },
             { key: 'payroll',    label: 'เงินเดือน', Icon: WalletIcon,          ready: true  },
+            { key: 'reconcile',  label: 'รีเช็คสิ้นเดือน', Icon: CheckCircleIcon, ready: true },
             { key: 'settings',   label: 'ตั้งค่า',   Icon: SettingsIcon,        ready: true  },
         ];
 
@@ -2727,6 +2920,7 @@
             const [isEmpModalOpen, setIsEmpModalOpen] = useState(false);
             const [editingEmp, setEditingEmp] = useState(null);
             const [departments, setDepartments] = useState([]);
+            const [lineIdMap, setLineIdMap] = useState([]);   // [{lineUserId, employeeName, status}] — ผูก LINE↔พนักงาน (#4)
 
             // --- auth ---
             const [token, setToken] = useState(() => sessionStorage.getItem('hr_token') || '');
@@ -2784,12 +2978,23 @@
                 } catch {}
             }, [uiScriptUrl, token]);
 
+            // โหลด mapping LINE user_id -> ชื่อพนักงาน (สำหรับ resolve leaveData ให้เป็นชื่อจริงแทนชื่อ LINE)
+            const loadLineIdMap = useCallback(async (tk) => {
+                const useToken = tk !== undefined ? tk : token;
+                const targetUrl = uiScriptUrl || APPS_SCRIPT_URL;
+                if (!targetUrl || targetUrl.includes("XXXX")) return;
+                try {
+                    const data = await postAction(targetUrl, useToken, 'list_line_id_map');
+                    setLineIdMap(data.rows || []);
+                } catch {}
+            }, [uiScriptUrl, token]);
+
             // เช็ค token ตอนเปิดแอป
             useEffect(() => {
                 (async () => {
                     if (!token) { setAuthChecking(false); return; }
                     const res = await fetchData(token);
-                    if (res.auth) { setAuthed(true); loadEmployees(token); loadDepartments(token); } else { sessionStorage.removeItem('hr_token'); setToken(''); }
+                    if (res.auth) { setAuthed(true); loadEmployees(token); loadDepartments(token); loadLineIdMap(token); } else { sessionStorage.removeItem('hr_token'); setToken(''); }
                     setAuthChecking(false);
                 })();
             }, []);
@@ -2797,12 +3002,12 @@
             const doLogin = async (pass) => {
                 setLoginBusy(true); setLoginError('');
                 const res = await fetchData(pass);
-                if (res.auth) { setToken(pass); sessionStorage.setItem('hr_token', pass); setAuthed(true); loadEmployees(pass); loadDepartments(pass); }
+                if (res.auth) { setToken(pass); sessionStorage.setItem('hr_token', pass); setAuthed(true); loadEmployees(pass); loadDepartments(pass); loadLineIdMap(pass); }
                 else setLoginError('รหัสผ่านไม่ถูกต้อง');
                 setLoginBusy(false);
             };
 
-            const logout = () => { sessionStorage.removeItem('hr_token'); setToken(''); setAuthed(false); setSheetData([]); setEmployees([]); setDepartments([]); };
+            const logout = () => { sessionStorage.removeItem('hr_token'); setToken(''); setAuthed(false); setSheetData([]); setEmployees([]); setDepartments([]); setLineIdMap([]); };
 
             const openAddEmp = () => { setEditingEmp(null); setIsEmpModalOpen(true); };
             const openEditEmp = (e) => { setEditingEmp(e); setIsEmpModalOpen(true); };
@@ -2812,7 +3017,25 @@
                 catch (err) { alert('ลบไม่สำเร็จ: ' + err.message); }
             };
 
-            const leaveData = sheetData.filter(d => d.type && d.type.includes('หยุด'));
+            // ผูก LINE user_id -> ชื่อพนักงาน (เฉพาะที่ยืนยันแล้ว status='mapped') — #4
+            // 2 ชั้น: byId (แม่นสุด, กันเปลี่ยนชื่อ LINE) -> byDisplayName (fallback สำหรับแถวเก่าที่ยังไม่มี lineUserId เก็บไว้)
+            const lineNameLookup = useMemo(() => {
+                const byId = {}, byDisplayName = {};
+                lineIdMap.forEach(r => {
+                    if (r.status === 'mapped' && r.employeeName) {
+                        if (r.lineUserId)  byId[r.lineUserId] = r.employeeName;
+                        if (r.displayName) byDisplayName[r.displayName] = r.employeeName;
+                    }
+                });
+                return { byId, byDisplayName };
+            }, [lineIdMap]);
+            // resolve ชื่อ LINE ดิบ -> ชื่อพนักงานจริง: id ก่อน (แม่นสุด) ไม่มีค่อย fallback ชื่อดิบ ไม่มีทั้งคู่ใช้ชื่อเดิม
+            const leaveData = useMemo(() => sheetData
+                .filter(d => d.type && d.type.includes('หยุด'))
+                .map(d => {
+                    const resolvedName = (d.lineUserId && lineNameLookup.byId[d.lineUserId]) || lineNameLookup.byDisplayName[d.name];
+                    return resolvedName ? { ...d, name: resolvedName, rawName: d.name } : { ...d, rawName: d.name };
+                }), [sheetData, lineNameLookup]);
             const handleChangeMonth = (delta) => { const n = new Date(currentDate); n.setMonth(n.getMonth() + delta); setCurrentDate(n); };
             const handleAddLeave = (dateStr) => { setAddLeaveDay(dateStr); setIsAddLeaveOpen(true); };
 
@@ -2913,6 +3136,12 @@
                             {visited.has('payroll') && (
                                 <div className={view === 'payroll' ? '' : 'hidden'}>
                                     <PayrollView scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} employees={employees} sheetData={sheetData}/>
+                                </div>
+                            )}
+
+                            {visited.has('reconcile') && (
+                                <div className={view === 'reconcile' ? '' : 'hidden'}>
+                                    <ReconciliationView scriptUrl={uiScriptUrl || APPS_SCRIPT_URL} token={token} leaveData={leaveData} employees={employees}/>
                                 </div>
                             )}
 
